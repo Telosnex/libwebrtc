@@ -72,3 +72,11 @@ visionOS slices. The iOS/macOS headers and binaries contain the Objective-C
 external-demand API and final-sender guard. The SHA-pinned CocoaPods spec is in
 `https://github.com/Telosnex/cocoapods-specs.git` at version
 `144.7559.09-telosnex.02`.
+
+## Headless Linux audio backend
+
+Linux continues to use WebRTC's platform-default audio layer unless
+`LIBWEBRTC_AUDIO_BACKEND=alsa` is present in the process environment. The
+explicit override is intended for headless systems that expose ALSA devices but
+do not run a PulseAudio server. It must be set before the peer-connection
+factory is initialized.

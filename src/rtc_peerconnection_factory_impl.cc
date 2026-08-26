@@ -1,5 +1,8 @@
 #include "rtc_peerconnection_factory_impl.h"
 
+#include <cstdlib>
+#include <cstring>
+
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
 #include "api/audio_codecs/builtin_audio_encoder_factory.h"
 #include "api/audio/create_audio_device_module.h"
@@ -116,11 +119,17 @@ bool RTCPeerConnectionFactoryImpl::Terminate() {
 }
 
 void RTCPeerConnectionFactoryImpl::CreateAudioDeviceModule_w() {
-  if (!audio_device_module_)
-    audio_device_module_ = webrtc::CreateAudioDeviceModule(
-        env_,
-        webrtc::AudioDeviceModule::kPlatformDefaultAudio,
-        false);
+  if (audio_device_module_) return;
+
+  auto audio_layer = webrtc::AudioDeviceModule::kPlatformDefaultAudio;
+#if defined(WEBRTC_LINUX)
+  const char* backend = std::getenv("LIBWEBRTC_AUDIO_BACKEND");
+  if (backend != nullptr && std::strcmp(backend, "alsa") == 0) {
+    audio_layer = webrtc::AudioDeviceModule::kLinuxAlsaAudio;
+  }
+#endif
+  audio_device_module_ =
+      webrtc::CreateAudioDeviceModule(env_, audio_layer, false);
 }
 
 void RTCPeerConnectionFactoryImpl::DestroyAudioDeviceModule_w() {
