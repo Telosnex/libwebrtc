@@ -72,3 +72,10 @@ visionOS slices. The iOS/macOS headers and binaries contain the Objective-C
 external-demand API and final-sender guard. The SHA-pinned CocoaPods spec is in
 `https://github.com/Telosnex/cocoapods-specs.git` at version
 `144.7559.09-telosnex.02`.
+
+## Linux audio backend selection
+
+`LibWebRTC::CreateRTCPeerConnectionFactory(RTCAudioBackend)` selects the Linux
+audio backend before the audio-device module is initialized. Platform default,
+ALSA, and PulseAudio are explicit typed choices. The no-argument overload
+retains platform-default behavior and ABI compatibility for existing callers.

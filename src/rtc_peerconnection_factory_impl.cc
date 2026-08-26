@@ -1,8 +1,8 @@
 #include "rtc_peerconnection_factory_impl.h"
 
+#include "api/audio/create_audio_device_module.h"
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
 #include "api/audio_codecs/builtin_audio_encoder_factory.h"
-#include "api/audio/create_audio_device_module.h"
 #include "api/create_peerconnection_factory.h"
 #include "api/media_stream_interface.h"
 #include "api/video_codecs/builtin_video_decoder_factory.h"
@@ -43,8 +43,13 @@ std::unique_ptr<webrtc::VideoDecoderFactory> CreateIntelVideoDecoderFactory() {
 }
 #endif
 
-RTCPeerConnectionFactoryImpl::RTCPeerConnectionFactoryImpl():
-env_(webrtc::EnvironmentFactory().Create()) {}
+RTCPeerConnectionFactoryImpl::RTCPeerConnectionFactoryImpl()
+    : RTCPeerConnectionFactoryImpl(RTCAudioBackend::kPlatformDefault) {}
+
+RTCPeerConnectionFactoryImpl::RTCPeerConnectionFactoryImpl(
+    RTCAudioBackend audio_backend)
+    : env_(webrtc::EnvironmentFactory().Create()),
+      audio_backend_(audio_backend) {}
 
 RTCPeerConnectionFactoryImpl::~RTCPeerConnectionFactoryImpl() {}
 
@@ -116,11 +121,18 @@ bool RTCPeerConnectionFactoryImpl::Terminate() {
 }
 
 void RTCPeerConnectionFactoryImpl::CreateAudioDeviceModule_w() {
-  if (!audio_device_module_)
-    audio_device_module_ = webrtc::CreateAudioDeviceModule(
-        env_,
-        webrtc::AudioDeviceModule::kPlatformDefaultAudio,
-        false);
+  if (audio_device_module_) return;
+
+  auto audio_layer = webrtc::AudioDeviceModule::kPlatformDefaultAudio;
+#if defined(WEBRTC_LINUX)
+  if (audio_backend_ == RTCAudioBackend::kAlsa) {
+    audio_layer = webrtc::AudioDeviceModule::kLinuxAlsaAudio;
+  } else if (audio_backend_ == RTCAudioBackend::kPulseAudio) {
+    audio_layer = webrtc::AudioDeviceModule::kLinuxPulseAudio;
+  }
+#endif
+  audio_device_module_ =
+      webrtc::CreateAudioDeviceModule(env_, audio_layer, false);
 }
 
 void RTCPeerConnectionFactoryImpl::DestroyAudioDeviceModule_w() {
@@ -269,9 +281,9 @@ scoped_refptr<RTCVideoSource> RTCPeerConnectionFactoryImpl::CreateVideoSource_s(
   return source;
 }
 
-scoped_refptr<RTCVideoSource> RTCPeerConnectionFactoryImpl::CreateCustomVideoSource(
-  string video_source_label,
-  scoped_refptr<RTCMediaConstraints> constraints) {
+scoped_refptr<RTCVideoSource>
+RTCPeerConnectionFactoryImpl::CreateCustomVideoSource(
+    string video_source_label, scoped_refptr<RTCMediaConstraints> constraints) {
   // A vanilla internal::VideoCapturer is a complete passthrough: its default
   // StartCapture/StopCapture/CaptureStarted are no-ops, but OnFrame still
   // routes pushed frames through the video adapter and broadcaster, which is

@@ -14,6 +14,12 @@
 
 namespace libwebrtc {
 
+enum class RTCAudioBackend {
+  kPlatformDefault,
+  kAlsa,
+  kPulseAudio,
+};
+
 class RTCPeerConnection;
 class RTCAudioDevice;
 class RTCAudioProcessing;
@@ -44,13 +50,14 @@ class RTCPeerConnectionFactory : public RefCountInterface {
       const string audio_source_label,
       RTCAudioSource::SourceType source_type =
           RTCAudioSource::SourceType::kMicrophone,
-        RTCAudioOptions options = RTCAudioOptions()) = 0;
+      RTCAudioOptions options = RTCAudioOptions()) = 0;
 
   virtual scoped_refptr<RTCVideoSource> CreateVideoSource(
       scoped_refptr<RTCVideoCapturer> capturer, const string video_source_label,
       scoped_refptr<RTCMediaConstraints> constraints) = 0;
 
-  virtual scoped_refptr<RTCVideoSource> CreateCustomVideoSource(string video_source_label,
+  virtual scoped_refptr<RTCVideoSource> CreateCustomVideoSource(
+      string video_source_label,
       scoped_refptr<RTCMediaConstraints> constraints) = 0;
 
 #ifdef RTC_DESKTOP_DEVICE
