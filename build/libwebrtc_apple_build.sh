@@ -76,6 +76,15 @@ run_gclient_sync() {
 
 run_gclient_sync
 
+# The stock Apple SDK exposes options-aware ADM start but its AudioState still
+# stops recording when the final sender disappears. Build the same external
+# demand ownership guard and Objective-C ADM surface as the desktop artifacts.
+(
+  cd src
+  git apply "$SCRIPT_DIR/../patches/external_recording_demand.patch" \
+    --verbose --ignore-space-change --ignore-whitespace --whitespace=nowarn
+)
+
 echo "xcframework_dynamic_build.sh: MODE=$MODE, DEBUG=$DEBUG, COMMIT=$COMMIT"
 
 gn gen $OUT_DIR/tvOS-arm64-device --root="src" --args="    
