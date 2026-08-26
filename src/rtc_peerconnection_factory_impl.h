@@ -28,6 +28,7 @@ namespace libwebrtc {
 class RTCPeerConnectionFactoryImpl : public RTCPeerConnectionFactory {
  public:
   RTCPeerConnectionFactoryImpl();
+  explicit RTCPeerConnectionFactoryImpl(RTCAudioBackend audio_backend);
 
   virtual ~RTCPeerConnectionFactoryImpl();
 
@@ -55,7 +56,8 @@ class RTCPeerConnectionFactoryImpl : public RTCPeerConnectionFactory {
       scoped_refptr<RTCVideoCapturer> capturer, const string video_source_label,
       scoped_refptr<RTCMediaConstraints> constraints) override;
 
-  virtual scoped_refptr<RTCVideoSource> CreateCustomVideoSource(string video_source_label,
+  virtual scoped_refptr<RTCVideoSource> CreateCustomVideoSource(
+      string video_source_label,
       scoped_refptr<RTCMediaConstraints> constraints) override;
 
 #ifdef RTC_DESKTOP_DEVICE
@@ -123,6 +125,7 @@ class RTCPeerConnectionFactoryImpl : public RTCPeerConnectionFactory {
   webrtc::scoped_refptr<webrtc::CustomAudioTransportFactory>
       audio_transport_factory_;
   webrtc::Environment env_;
+  RTCAudioBackend audio_backend_;
 };
 
 }  // namespace libwebrtc

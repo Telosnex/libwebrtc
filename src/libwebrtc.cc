@@ -31,9 +31,14 @@ void LibWebRTC::Terminate() {
 // Creates and returns an instance of RTCPeerConnectionFactory.
 scoped_refptr<RTCPeerConnectionFactory>
 LibWebRTC::CreateRTCPeerConnectionFactory() {
+  return CreateRTCPeerConnectionFactory(RTCAudioBackend::kPlatformDefault);
+}
+
+scoped_refptr<RTCPeerConnectionFactory>
+LibWebRTC::CreateRTCPeerConnectionFactory(RTCAudioBackend audio_backend) {
   scoped_refptr<RTCPeerConnectionFactory> rtc_peerconnection_factory =
       scoped_refptr<RTCPeerConnectionFactory>(
-          new RefCountedObject<RTCPeerConnectionFactoryImpl>());
+          new RefCountedObject<RTCPeerConnectionFactoryImpl>(audio_backend));
   return rtc_peerconnection_factory;
 }
 

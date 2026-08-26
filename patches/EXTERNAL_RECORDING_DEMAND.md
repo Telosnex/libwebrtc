@@ -73,10 +73,9 @@ external-demand API and final-sender guard. The SHA-pinned CocoaPods spec is in
 `https://github.com/Telosnex/cocoapods-specs.git` at version
 `144.7559.09-telosnex.02`.
 
-## Headless Linux audio backend
+## Linux audio backend selection
 
-Linux continues to use WebRTC's platform-default audio layer unless
-`LIBWEBRTC_AUDIO_BACKEND=alsa` is present in the process environment. The
-explicit override is intended for headless systems that expose ALSA devices but
-do not run a PulseAudio server. It must be set before the peer-connection
-factory is initialized.
+`LibWebRTC::CreateRTCPeerConnectionFactory(RTCAudioBackend)` selects the Linux
+audio backend before the audio-device module is initialized. Platform default,
+ALSA, and PulseAudio are explicit typed choices. The no-argument overload
+retains platform-default behavior and ABI compatibility for existing callers.

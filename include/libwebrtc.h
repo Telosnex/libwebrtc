@@ -43,6 +43,9 @@ class LibWebRTC {
   LIB_WEBRTC_API static scoped_refptr<RTCPeerConnectionFactory>
   CreateRTCPeerConnectionFactory();
 
+  LIB_WEBRTC_API static scoped_refptr<RTCPeerConnectionFactory>
+  CreateRTCPeerConnectionFactory(RTCAudioBackend audio_backend);
+
   /**
    * @brief Terminates the WebRTC PeerConnectionFactory and threads.
    *
