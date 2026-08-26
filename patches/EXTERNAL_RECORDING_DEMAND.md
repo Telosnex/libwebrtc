@@ -47,7 +47,7 @@ Published desktop wrapper artifacts (build validated, not audio-device
 qualified):
 
 ```
-https://github.com/jpohhhh/libwebrtc/releases/tag/libwebrtc.m144.7559.09-telosnex.01
+https://github.com/Telosnex/libwebrtc/releases/tag/libwebrtc.m144.7559.09-telosnex.01
 Linux x64:   f0156804d153c82e3b454ddbb1180d920e31f25d9a3ed69ef46be6dcfcc26ef7
 Linux arm64: ea47d62ad084110b1552db2d6a1f665c6244eca38d90e976a2b6b4975310fb2d
 Windows x64: f7d8f87fc309d982b747c24fbda3207636bc1e1916ab1a6857140d99c5dea4da
@@ -63,7 +63,7 @@ C1–C4 and route tests remain release-qualification gates.
 Published Apple XCFramework (build validated, not physical-device qualified):
 
 ```
-https://github.com/jpohhhh/libwebrtc/releases/tag/libwebrtc.m144.7559.09-telosnex.02
+https://github.com/Telosnex/libwebrtc/releases/tag/libwebrtc.m144.7559.09-telosnex.02
 SHA-256 9ba5491b7b3e754c30c4bbad307162d855f809455649e0d2506ca0eaea5219e4
 ```
 
