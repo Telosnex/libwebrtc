@@ -5,6 +5,7 @@
 
 #include "modules/audio_processing/include/audio_processing.h"
 #include "rtc_audio_processing.h"
+#include "rtc_base/synchronization/mutex.h"
 
 namespace libwebrtc {
 
@@ -20,6 +21,11 @@ class RTCAudioProcessingImpl : public RTCAudioProcessing {
   void SetRenderPreProcessing(
       RTCAudioProcessing::CustomProcessing* render_pre_processing) override;
 
+  int32_t ApplyCaptureProfile(
+      const RTCAudioProcessing::Profile& profile) override;
+
+  RTCAudioProcessing::ProcessingState GetCaptureProcessingState() override;
+
   virtual webrtc::scoped_refptr<webrtc::AudioProcessing> GetAudioProcessing() {
     return apm_;
   }
@@ -28,6 +34,7 @@ class RTCAudioProcessingImpl : public RTCAudioProcessing {
   CustomProcessingAdapter* capture_post_processor_;
   CustomProcessingAdapter* render_pre_processor_;
   webrtc::scoped_refptr<webrtc::AudioProcessing> apm_;
+  webrtc::Mutex profile_mutex_;
 };
 
 }  // namespace libwebrtc

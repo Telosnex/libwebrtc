@@ -14,6 +14,12 @@ class RTCAudioDevice : public RefCountInterface {
  public:
   typedef fixed_size_function<void()> OnDeviceChangeCallback;
 
+  struct RecordingState {
+    bool initialized = false;
+    bool recording = false;
+    bool external_demand = false;
+  };
+
  public:
   static const int kAdmMaxDeviceNameSize = 128;
   static const int kAdmMaxFileNameSize = 512;
@@ -89,6 +95,21 @@ class RTCAudioDevice : public RefCountInterface {
   virtual int32_t SetSpeakerVolume(uint32_t volume) = 0;
 
   virtual int32_t SpeakerVolume(uint32_t& volume) = 0;
+
+  /**
+   * Acquires app-owned recording demand and starts the shared ADM recording
+   * path. Safe to call from outside the WebRTC worker thread.
+   */
+  virtual int32_t AcquireRecording() = 0;
+
+  /**
+   * Releases app-owned recording demand and stops the ADM. Call only after all
+   * peers borrowing the app-owned track have been disposed.
+   */
+  virtual int32_t ReleaseRecording() = 0;
+
+  /** Returns one worker-thread-consistent recording state snapshot. */
+  virtual RecordingState GetRecordingState() = 0;
 
  protected:
   virtual ~RTCAudioDevice() {}

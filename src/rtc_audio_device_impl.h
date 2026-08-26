@@ -39,6 +39,12 @@ class AudioDeviceImpl : public RTCAudioDevice, public webrtc::AudioDeviceObserve
 
   int32_t SpeakerVolume(uint32_t& volume) override;
 
+  int32_t AcquireRecording() override;
+
+  int32_t ReleaseRecording() override;
+
+  RecordingState GetRecordingState() override;
+
   int32_t OnDeviceChange(OnDeviceChangeCallback listener) override;
 
  protected:

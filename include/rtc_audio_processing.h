@@ -7,6 +7,25 @@ namespace libwebrtc {
 
 class RTCAudioProcessing : public RefCountInterface {
  public:
+  struct Profile {
+    bool echo_cancellation = true;
+    bool noise_suppression = true;
+    bool auto_gain_control = true;
+    bool high_pass_filter = true;
+  };
+
+  struct ComponentState {
+    bool software_active = false;
+  };
+
+  struct ProcessingState {
+    bool has_audio_processing_module = false;
+    ComponentState echo_cancellation;
+    ComponentState noise_suppression;
+    ComponentState auto_gain_control;
+    ComponentState high_pass_filter;
+  };
+
   class CustomProcessing {
    public:
     virtual void Initialize(int sample_rate_hz, int num_channels) = 0;
@@ -28,6 +47,12 @@ class RTCAudioProcessing : public RefCountInterface {
 
   virtual void SetRenderPreProcessing(
       CustomProcessing* render_pre_processing) = 0;
+
+  /** Applies the app-owned capture profile directly to the shared APM. */
+  virtual int32_t ApplyCaptureProfile(const Profile& profile) = 0;
+
+  /** Reads back the live software configuration from the shared APM. */
+  virtual ProcessingState GetCaptureProcessingState() = 0;
 };
 
 }  // namespace libwebrtc

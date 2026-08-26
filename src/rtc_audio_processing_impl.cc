@@ -12,14 +12,26 @@ namespace libwebrtc {
 class CustomProcessingAdapter : public webrtc::CustomProcessing {
  public:
   CustomProcessingAdapter() = default;
-  ~CustomProcessingAdapter() override = default;
+  ~CustomProcessingAdapter() override {
+    SetExternalAudioProcessing(nullptr);
+  }
 
   void SetExternalAudioProcessing(
       RTCAudioProcessing::CustomProcessing* processor) {
-    webrtc::MutexLock lock(&mutex_);
-    custom_processor_ = processor;
-    if (initialized_) {
-      custom_processor_->Initialize(sample_rate_hz_, num_channels_);
+    RTCAudioProcessing::CustomProcessing* previous = nullptr;
+    {
+      webrtc::MutexLock lock(&mutex_);
+      if (custom_processor_ == processor) {
+        return;
+      }
+      previous = custom_processor_;
+      custom_processor_ = processor;
+      if (custom_processor_ && initialized_) {
+        custom_processor_->Initialize(sample_rate_hz_, num_channels_);
+      }
+    }
+    if (previous) {
+      previous->Release();
     }
   }
 
@@ -67,7 +79,7 @@ class CustomProcessingAdapter : public webrtc::CustomProcessing {
 
  private:
   mutable webrtc::Mutex mutex_;
-  RTCAudioProcessing::CustomProcessing* custom_processor_;
+  RTCAudioProcessing::CustomProcessing* custom_processor_ = nullptr;
   bool bypass_flag_ = false;
   bool initialized_ = false;
   int sample_rate_hz_ = 0;
@@ -102,6 +114,41 @@ void RTCAudioProcessingImpl::SetCapturePostProcessing(
 void RTCAudioProcessingImpl::SetRenderPreProcessing(
     RTCAudioProcessing::CustomProcessing* processor) {
   render_pre_processor_->SetExternalAudioProcessing(processor);
+}
+
+int32_t RTCAudioProcessingImpl::ApplyCaptureProfile(
+    const RTCAudioProcessing::Profile& profile) {
+  webrtc::MutexLock lock(&profile_mutex_);
+  webrtc::AudioProcessing::Config config = apm_->GetConfig();
+  config.echo_canceller.enabled = profile.echo_cancellation;
+  config.noise_suppression.enabled = profile.noise_suppression;
+  config.noise_suppression.level =
+      webrtc::AudioProcessing::Config::NoiseSuppression::Level::kHigh;
+  config.gain_controller1.enabled = profile.auto_gain_control;
+  config.gain_controller1.mode =
+      webrtc::AudioProcessing::Config::GainController1::kAdaptiveAnalog;
+  config.high_pass_filter.enabled = profile.high_pass_filter;
+  apm_->ApplyConfig(config);
+  return 0;
+}
+
+RTCAudioProcessing::ProcessingState
+RTCAudioProcessingImpl::GetCaptureProcessingState() {
+  webrtc::MutexLock lock(&profile_mutex_);
+  webrtc::AudioProcessing::Config config = apm_->GetConfig();
+  ProcessingState state;
+  state.has_audio_processing_module = apm_ != nullptr;
+  auto component = [](bool active) {
+    ComponentState state;
+    state.software_active = active;
+    return state;
+  };
+  state.echo_cancellation = component(config.echo_canceller.enabled);
+  state.noise_suppression = component(config.noise_suppression.enabled);
+  state.auto_gain_control = component(
+      config.gain_controller1.enabled || config.gain_controller2.enabled);
+  state.high_pass_filter = component(config.high_pass_filter.enabled);
+  return state;
 }
 
 }  // namespace libwebrtc
