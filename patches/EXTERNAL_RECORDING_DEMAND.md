@@ -70,5 +70,5 @@ SHA-256 9ba5491b7b3e754c30c4bbad307162d855f809455649e0d2506ca0eaea5219e4
 CI run `32930758729` built iOS device/simulator, macOS, Catalyst, tvOS, and
 visionOS slices. The iOS/macOS headers and binaries contain the Objective-C
 external-demand API and final-sender guard. The SHA-pinned CocoaPods spec is in
-`https://github.com/jpohhhh/cocoapods-specs.git` at version
+`https://github.com/Telosnex/cocoapods-specs.git` at version
 `144.7559.09-telosnex.02`.
