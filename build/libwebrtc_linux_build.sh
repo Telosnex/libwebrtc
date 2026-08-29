@@ -170,7 +170,7 @@ if [ "$arch" = "x64" ]; then
     ./external_recording_demand_unittests \
       --gtest_filter='ExternalRecordingDemandTest.LastSenderRemovalKeepsRecording'
     ./tsnx_aec_guarantees_unittests
-    python3 ../src/libwebrtc/test/aec_guarantees/smoke_replay.py \
+    python3 "$SCRIPT_DIR/../test/aec_guarantees/smoke_replay.py" \
       ./tsnx_replay
   )
 else

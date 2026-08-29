@@ -3,7 +3,7 @@ diff --git a/api/audio/audio_device_defines.h b/api/audio/audio_device_defines.h
 +++ b/api/audio/audio_device_defines.h
 @@ -20,6 +20,18 @@
  #include "rtc_base/strings/string_builder.h"
-
+ 
  namespace webrtc {
 +
 +// Monotonic sample-clock observation supplied by hardware-backed audio device
@@ -17,7 +17,7 @@ diff --git a/api/audio/audio_device_defines.h b/api/audio/audio_device_defines.h
 +  uint32_t sample_rate_hz;
 +  uint32_t generation;
 +};
-
+ 
  static const int kAdmMaxDeviceNameSize = 128;
  static const int kAdmMaxFileNameSize = 512;
 @@ -85,6 +97,11 @@
@@ -29,7 +29,7 @@ diff --git a/api/audio/audio_device_defines.h b/api/audio/audio_device_defines.h
 +  // stable hardware position simply never call this method.
 +  virtual void OnAudioHardwareClockObservation(
 +      const AudioHardwareClockObservation& observation) {}
-
+ 
   protected:
    virtual ~AudioTransport() {}
 diff --git a/modules/audio_device/audio_device_buffer.h b/modules/audio_device/audio_device_buffer.h
@@ -42,7 +42,7 @@ diff --git a/modules/audio_device/audio_device_buffer.h b/modules/audio_device/a
 +  void DeliverHardwareClockObservation(
 +      const AudioHardwareClockObservation& observation);
    uint32_t NewMicLevel() const;
-
+ 
    virtual int32_t RequestPlayoutData(size_t samples_per_channel);
 diff --git a/modules/audio_device/audio_device_buffer.cc b/modules/audio_device/audio_device_buffer.cc
 --- a/modules/audio_device/audio_device_buffer.cc
@@ -58,5 +58,5 @@ diff --git a/modules/audio_device/audio_device_buffer.cc b/modules/audio_device/
 +  if (audio_transport_cb_)
 +    audio_transport_cb_->OnAudioHardwareClockObservation(observation);
  }
-
+ 
  int32_t AudioDeviceBuffer::RequestPlayoutData(size_t samples_per_channel) {

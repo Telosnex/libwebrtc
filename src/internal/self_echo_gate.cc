@@ -10,6 +10,7 @@ namespace {
 constexpr float kAbsFloorDb = -75.f;
 constexpr float kActBelowPeakDb = 35.f;
 constexpr float kEps = 1e-10f;
+constexpr double kPi = 3.14159265358979323846;
 
 float MaskedMedian(std::vector<float>& v) {
   if (v.empty()) return 0.f;
@@ -36,7 +37,7 @@ void SelfEchoGate::InitBank(Bank& bank, uint32_t rate_hz) {
         lo * std::pow(hi / lo, static_cast<double>(b + 1) / kBands);
     const double fc = std::sqrt(e0 * e1);
     const double q = fc / (e1 - e0);
-    const double w0 = 2.0 * M_PI * fc / rate_hz;
+    const double w0 = 2.0 * kPi * fc / rate_hz;
     const double alpha = std::sin(w0) / (2.0 * q);
     const double a0 = 1.0 + alpha;
     Biquad& f = bank.f[b];
