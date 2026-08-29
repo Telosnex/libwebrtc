@@ -81,6 +81,8 @@ run_gclient_sync
 # demand ownership guard and Objective-C ADM surface as the desktop artifacts.
 (
   cd src
+  git apply "$SCRIPT_DIR/../patches/tsnx_hardware_clock_api.patch" \
+    --verbose --ignore-space-change --ignore-whitespace --whitespace=nowarn
   git apply "$SCRIPT_DIR/../patches/external_recording_demand.patch" \
     --verbose --ignore-space-change --ignore-whitespace --whitespace=nowarn
 )

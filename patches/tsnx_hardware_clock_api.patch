@@ -1,0 +1,62 @@
+diff --git a/api/audio/audio_device_defines.h b/api/audio/audio_device_defines.h
+--- a/api/audio/audio_device_defines.h
++++ b/api/audio/audio_device_defines.h
+@@ -20,6 +20,18 @@
+ #include "rtc_base/strings/string_builder.h"
+
+ namespace webrtc {
++
++// Monotonic sample-clock observation supplied by hardware-backed audio device
++// modules. `position_frames` is an unwrapped hardware-domain frame position;
++// `generation` changes whenever recovery invalidates that position's origin.
++enum class AudioHardwareClockDirection { kPlayout, kCapture };
++struct AudioHardwareClockObservation {
++  AudioHardwareClockDirection direction;
++  int64_t monotonic_time_ns;
++  int64_t position_frames;
++  uint32_t sample_rate_hz;
++  uint32_t generation;
++};
+
+ static const int kAdmMaxDeviceNameSize = 128;
+ static const int kAdmMaxFileNameSize = 512;
+@@ -85,6 +97,11 @@
+                               void* audio_data,
+                               int64_t* elapsed_time_ms,
+                               int64_t* ntp_time_ms) = 0;
++
++  // Optional hardware-clock telemetry. Platform ADMs that cannot expose a
++  // stable hardware position simply never call this method.
++  virtual void OnAudioHardwareClockObservation(
++      const AudioHardwareClockObservation& observation) {}
+
+  protected:
+   virtual ~AudioTransport() {}
+diff --git a/modules/audio_device/audio_device_buffer.h b/modules/audio_device/audio_device_buffer.h
+--- a/modules/audio_device/audio_device_buffer.h
++++ b/modules/audio_device/audio_device_buffer.h
+@@ -117,6 +117,8 @@
+       std::optional<int64_t> capture_timestamp_ns);
+   virtual void SetVQEData(int play_delay_ms, int rec_delay_ms);
+   virtual int32_t DeliverRecordedData();
++  void DeliverHardwareClockObservation(
++      const AudioHardwareClockObservation& observation);
+   uint32_t NewMicLevel() const;
+
+   virtual int32_t RequestPlayoutData(size_t samples_per_channel);
+diff --git a/modules/audio_device/audio_device_buffer.cc b/modules/audio_device/audio_device_buffer.cc
+--- a/modules/audio_device/audio_device_buffer.cc
++++ b/modules/audio_device/audio_device_buffer.cc
+@@ -340,6 +340,12 @@
+     RTC_LOG(LS_ERROR) << "RecordedDataIsAvailable() failed";
+   }
+   return 0;
++}
++
++void AudioDeviceBuffer::DeliverHardwareClockObservation(
++    const AudioHardwareClockObservation& observation) {
++  if (audio_transport_cb_)
++    audio_transport_cb_->OnAudioHardwareClockObservation(observation);
+ }
+
+ int32_t AudioDeviceBuffer::RequestPlayoutData(size_t samples_per_channel) {

@@ -25,7 +25,7 @@ if (is_linux) {
   }
 }
 
-if (is_linux) {
+if (rtc_include_tests && is_linux) {
   rtc_executable("tsnx_replay") {
     testonly = true
     include_dirs = [ "." ]
@@ -91,30 +91,32 @@ if (is_linux) {
   }
 }
 
-rtc_test("libwebrtc_cpp_api_unittests") {
-  testonly = true
-  sources = [ "test/peerconnection_factory.test.cc" ]
-  deps = [
-    ":libwebrtc",
-    "//testing/gtest",
-    "//test:test_main",
-    "//test:test_support",
-  ]
-}
+if (rtc_include_tests) {
+  rtc_test("libwebrtc_cpp_api_unittests") {
+    testonly = true
+    sources = [ "test/peerconnection_factory.test.cc" ]
+    deps = [
+      ":libwebrtc",
+      "//testing/gtest",
+      "//test:test_main",
+      "//test:test_support",
+    ]
+  }
 
-rtc_test("external_recording_demand_unittests") {
-  testonly = true
-  sources = [ "test/external_recording_demand.test.cc" ]
-  deps = [
-    "//api:make_ref_counted",
-    "//audio",
-    "//call:mock_call_interfaces",
-    "//modules/audio_device:mock_audio_device",
-    "//modules/audio_mixer:audio_mixer_impl",
-    "//modules/audio_processing:mocks",
-    "//test:test_main",
-    "//test:test_support",
-  ]
+  rtc_test("external_recording_demand_unittests") {
+    testonly = true
+    sources = [ "test/external_recording_demand.test.cc" ]
+    deps = [
+      "//api:make_ref_counted",
+      "//audio",
+      "//call:mock_call_interfaces",
+      "//modules/audio_device:mock_audio_device",
+      "//modules/audio_mixer:audio_mixer_impl",
+      "//modules/audio_processing:mocks",
+      "//test:test_main",
+      "//test:test_support",
+    ]
+  }
 }
 
 config("external_config") {

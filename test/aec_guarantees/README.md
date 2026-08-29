@@ -41,6 +41,12 @@ prepare/XRUN recovery, preventing a fit from crossing a counter discontinuity.
 The estimator separately regresses normalized capture and playout rates against
 the same clock and passes their ratio to the existing bounded resampler.
 
+`tsnx_hardware_clock_api.patch` owns the portable observation type, default
+no-op `AudioTransport` callback, and `AudioDeviceBuffer` forwarding method. It
+is applied on Android, Apple, Linux, and Windows. Only Linux additionally
+applies `tsnx_alsa_hw_clock.patch`, so non-Linux ADMs compile and behave exactly
+as before while remaining able to add a hardware producer later.
+
 Runtime modes:
 
 ```text

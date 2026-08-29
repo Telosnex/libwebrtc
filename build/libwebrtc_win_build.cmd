@@ -91,6 +91,7 @@ if not exist src/libwebrtc (
 
 cd src
 copy .vpython3 ..
+call git apply "libwebrtc\patches\tsnx_hardware_clock_api.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 call git apply "libwebrtc\patches\custom_audio_source_m144.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 call git apply "libwebrtc\patches\external_recording_demand.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 call git apply "libwebrtc\patches\add_libwebrtc_build_target.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn

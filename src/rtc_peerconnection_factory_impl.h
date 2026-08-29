@@ -125,7 +125,9 @@ class RTCPeerConnectionFactoryImpl : public RTCPeerConnectionFactory {
   webrtc::scoped_refptr<webrtc::CustomAudioTransportFactory>
       audio_transport_factory_;
   webrtc::Environment env_;
-  RTCAudioBackend audio_backend_;
+  // Only the Linux ADM exposes a backend choice; other platform constructors
+  // retain the common API but intentionally ignore this value.
+  [[maybe_unused]] RTCAudioBackend audio_backend_;
 };
 
 }  // namespace libwebrtc

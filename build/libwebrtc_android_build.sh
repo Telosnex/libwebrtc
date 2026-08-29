@@ -90,6 +90,7 @@ fi
 
 cd src
 cp .vpython3 ..
+git apply "libwebrtc/patches/tsnx_hardware_clock_api.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 git apply "libwebrtc/patches/custom_audio_source_m144.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 git apply "libwebrtc/patches/add_libwebrtc_build_target.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 cd ..
