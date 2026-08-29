@@ -11,7 +11,7 @@ possible supported platforms
 
 ## Note
 
-Use the https://github.com/webrtc-sdk/webrtc.git branch m144_release to compile.
+Build M144 from the pinned upstream commit `b1800a61db8320af5c14456c13622d8b85b1ed39`. Do not build release artifacts from the moving `m144_release` branch.
 
 ## Usage
 
@@ -28,7 +28,7 @@ cd libwebrtc_build
 solutions = [
   {
     "name"        : 'src',
-    "url"         : 'https://github.com/webrtc-sdk/webrtc.git@m144_release',
+    "url"         : 'https://github.com/webrtc-sdk/webrtc.git@b1800a61db8320af5c14456c13622d8b85b1ed39',
     "deps_file"   : 'DEPS',
     "managed"     : False,
     "custom_deps" : {
