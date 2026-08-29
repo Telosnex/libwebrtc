@@ -108,6 +108,7 @@ git apply "libwebrtc/patches/custom_audio_source_m144.patch" -v --ignore-space-c
 git apply "libwebrtc/patches/external_recording_demand.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 git apply "libwebrtc/patches/add_libwebrtc_build_target.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 git apply "libwebrtc/patches/fix_desktop_capture_compile.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
+git apply "libwebrtc/patches/tsnx_alsa_capture_depth.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 cd ..
 
 mkdir -p "$ARTIFACTS_DIR/lib"
@@ -154,7 +155,9 @@ gn gen "$OUTPUT_DIR" --root="src" --args="${args}"
 ninja -C "$OUTPUT_DIR" \
   libwebrtc \
   libwebrtc_cpp_api_unittests \
-  external_recording_demand_unittests
+  external_recording_demand_unittests \
+  tsnx_aec_guarantees_unittests \
+  tsnx_replay
 
 if [ "$arch" = "x64" ]; then
   (
@@ -163,6 +166,9 @@ if [ "$arch" = "x64" ]; then
       --gtest_filter='AudioProcessing.*:AudioDevice.RecordingStateReadbackHasNoCaptureSideEffect'
     ./external_recording_demand_unittests \
       --gtest_filter='ExternalRecordingDemandTest.LastSenderRemovalKeepsRecording'
+    ./tsnx_aec_guarantees_unittests
+    python3 ../src/libwebrtc/test/aec_guarantees/smoke_replay.py \
+      ./tsnx_replay
   )
 else
   echo "ARM64 tests compiled; execution requires an ARM64 host."

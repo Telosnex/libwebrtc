@@ -1,0 +1,139 @@
+diff --git a/modules/audio_device/linux/alsasymboltable_linux.h b/modules/audio_device/linux/alsasymboltable_linux.h
+index c9970b02bc..0fba02593b 100644
+--- a/modules/audio_device/linux/alsasymboltable_linux.h
++++ b/modules/audio_device/linux/alsasymboltable_linux.h
+@@ -78,6 +78,7 @@ namespace adm_linux_alsa {
+   X(snd_pcm_hw_params_set_channels)            \
+   X(snd_pcm_hw_params_set_rate_near)           \
+   X(snd_pcm_hw_params_set_buffer_size_near)    \
++  X(snd_pcm_hw_params_set_period_size_near)    \
+   X(snd_card_next)                             \
+   X(snd_card_get_name)                         \
+   X(snd_config_update)                         \
+diff --git a/modules/audio_device/linux/audio_device_alsa_linux.cc b/modules/audio_device/linux/audio_device_alsa_linux.cc
+index 4e504f354d..f95f484351 100644
+--- a/modules/audio_device/linux/audio_device_alsa_linux.cc
++++ b/modules/audio_device/linux/audio_device_alsa_linux.cc
+@@ -75,7 +75,11 @@ static const unsigned int ALSA_PLAYOUT_CH = 2;
+ static const unsigned int ALSA_PLAYOUT_LATENCY = 40 * 1000;  // in us
+ static const unsigned int ALSA_CAPTURE_FREQ = 48000;
+ static const unsigned int ALSA_CAPTURE_CH = 2;
+-static const unsigned int ALSA_CAPTURE_LATENCY = 40 * 1000;  // in us
++// TSNX: deep capture ring. Capture depth is overrun headroom, not
++// latency (frames are read as soon as available). 40 ms meant any
++// capture-thread stall > 40 ms dropped samples and reset AEC3
++// convergence; measured stalls on the appliance reach 514 ms.
++static const unsigned int ALSA_CAPTURE_LATENCY = 1000 * 1000;  // in us
+ static const unsigned int ALSA_CAPTURE_WAIT_TIMEOUT = 5;     // in ms
+ 
+ #define FUNC_GET_NUM_OF_DEVICE 0
+@@ -940,45 +944,73 @@ int32_t AudioDeviceLinuxALSA::InitRecordingLocked() {
+   }
+ 
+   _recordingFramesIn10MS = _recordingFreq / 100;
+-  if ((errVal =
+-           LATE(snd_pcm_set_params)(_handleRecord,
+-#if defined(WEBRTC_ARCH_BIG_ENDIAN)
+-                                    SND_PCM_FORMAT_S16_BE,  // format
+-#else
+-                                    SND_PCM_FORMAT_S16_LE,  // format
+-#endif
+-                                    SND_PCM_ACCESS_RW_INTERLEAVED,  // access
+-                                    _recChannels,                   // channels
+-                                    _recordingFreq,                 // rate
+-                                    1,                    // soft_resample
+-                                    ALSA_CAPTURE_LATENCY  // latency in us
+-                                    )) < 0) {
+-    // Fall back to another mode then.
+-    if (_recChannels == 1)
+-      _recChannels = 2;
+-    else
+-      _recChannels = 1;
+-
+-    if ((errVal =
+-             LATE(snd_pcm_set_params)(_handleRecord,
++  // TSNX: explicit hw_params instead of snd_pcm_set_params(latency).
++  // set_params derives period ~= latency/4, so a deep ring configured via
++  // latency alone delivers capture in ~250 ms bursts, which quantizes
++  // capture timing and prevents AEC3 delay convergence. We need BOTH a
++  // 10 ms period (smooth delivery) AND a ~1 s ring (overrun headroom for
++  // capture-thread stalls; measured up to 514 ms on the appliance).
++  {
++    const auto configure = [&](unsigned int channels) -> int {
++      snd_pcm_hw_params_t* hw = nullptr;
++      int err = LATE(snd_pcm_hw_params_malloc)(&hw);
++      if (err < 0) return err;
++      const auto fail = [&](int e) {
++        LATE(snd_pcm_hw_params_free)(hw);
++        return e;
++      };
++      if ((err = LATE(snd_pcm_hw_params_any)(_handleRecord, hw)) < 0)
++        return fail(err);
++      if ((err = LATE(snd_pcm_hw_params_set_access)(
++               _handleRecord, hw, SND_PCM_ACCESS_RW_INTERLEAVED)) < 0)
++        return fail(err);
+ #if defined(WEBRTC_ARCH_BIG_ENDIAN)
+-                                      SND_PCM_FORMAT_S16_BE,  // format
++      if ((err = LATE(snd_pcm_hw_params_set_format)(_handleRecord, hw,
++                                                    SND_PCM_FORMAT_S16_BE)) < 0)
++        return fail(err);
+ #else
+-                                      SND_PCM_FORMAT_S16_LE,  // format
++      if ((err = LATE(snd_pcm_hw_params_set_format)(_handleRecord, hw,
++                                                    SND_PCM_FORMAT_S16_LE)) < 0)
++        return fail(err);
+ #endif
+-                                      SND_PCM_ACCESS_RW_INTERLEAVED,  // access
+-                                      _recChannels,         // channels
+-                                      _recordingFreq,       // rate
+-                                      1,                    // soft_resample
+-                                      ALSA_CAPTURE_LATENCY  // latency in us
+-                                      )) < 0) {
+-      _recordingFramesIn10MS = 0;
+-      RTC_LOG(LS_ERROR) << "unable to set record settings: "
+-                        << LATE(snd_strerror)(errVal) << " (" << errVal << ")";
+-      ErrorRecovery(errVal, _handleRecord);
+-      errVal = LATE(snd_pcm_close)(_handleRecord);
+-      _handleRecord = nullptr;
+-      return -1;
++      if ((err = LATE(snd_pcm_hw_params_set_channels)(_handleRecord, hw,
++                                                      channels)) < 0)
++        return fail(err);
++      unsigned int rate = _recordingFreq;
++      if ((err = LATE(snd_pcm_hw_params_set_rate_near)(_handleRecord, hw,
++                                                       &rate, nullptr)) < 0)
++        return fail(err);
++      snd_pcm_uframes_t period = _recordingFramesIn10MS;
++      int dir = 0;
++      if ((err = LATE(snd_pcm_hw_params_set_period_size_near)(
++               _handleRecord, hw, &period, &dir)) < 0)
++        return fail(err);
++      snd_pcm_uframes_t buffer = _recordingFreq;  // 1 second ring
++      if ((err = LATE(snd_pcm_hw_params_set_buffer_size_near)(_handleRecord,
++                                                              hw, &buffer)) < 0)
++        return fail(err);
++      if ((err = LATE(snd_pcm_hw_params)(_handleRecord, hw)) < 0)
++        return fail(err);
++      LATE(snd_pcm_hw_params_free)(hw);
++      fprintf(stderr, "TSNX alsa capture: rate %u period %lu buffer %lu\n",
++              rate, (unsigned long)period, (unsigned long)buffer);
++      return 0;
++    };
++    errVal = configure(_recChannels);
++    if (errVal < 0) {
++      // Fall back to the other channel count, as before.
++      _recChannels = (_recChannels == 1) ? 2 : 1;
++      errVal = configure(_recChannels);
++      if (errVal < 0) {
++        _recordingFramesIn10MS = 0;
++        RTC_LOG(LS_ERROR) << "unable to set record settings: "
++                          << LATE(snd_strerror)(errVal) << " (" << errVal
++                          << ")";
++        ErrorRecovery(errVal, _handleRecord);
++        errVal = LATE(snd_pcm_close)(_handleRecord);
++        _handleRecord = nullptr;
++        return -1;
++      }
+     }
+   }
+ 

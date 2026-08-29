@@ -25,6 +25,53 @@ if (is_linux) {
   }
 }
 
+if (is_linux) {
+  rtc_executable("tsnx_replay") {
+    testonly = true
+    include_dirs = [ "." ]
+    sources = [
+      "src/internal/session_tap.cc",
+      "src/internal/session_tap.h",
+      "src/internal/drift_servo.cc",
+      "src/internal/drift_servo.h",
+      "src/internal/self_echo_gate.cc",
+      "src/internal/self_echo_gate.h",
+      "test/aec_guarantees/tsnx_replay.cc",
+    ]
+    deps = [
+      "//api/audio:audio_processing",
+      "//api/audio:builtin_audio_processing_builder",
+      "//api/environment:environment_factory",
+      "//common_audio",
+      "//rtc_base:checks",
+      "//rtc_base:logging",
+      "//rtc_base:macromagic",
+      "//rtc_base/synchronization:mutex",
+    ]
+  }
+
+  rtc_test("tsnx_aec_guarantees_unittests") {
+    testonly = true
+    include_dirs = [ "." ]
+    sources = [
+      "src/internal/drift_servo.cc",
+      "src/internal/drift_servo.h",
+      "src/internal/self_echo_gate.cc",
+      "src/internal/self_echo_gate.h",
+      "src/internal/session_tap.cc",
+      "src/internal/session_tap.h",
+      "test/aec_guarantees/aec_guarantees.test.cc",
+    ]
+    deps = [
+      "//common_audio",
+      "//rtc_base:logging",
+      "//rtc_base/synchronization:mutex",
+      "//test:test_main",
+      "//test:test_support",
+    ]
+  }
+}
+
 rtc_test("libwebrtc_cpp_api_unittests") {
   testonly = true
   sources = [ "test/peerconnection_factory.test.cc" ]
@@ -125,6 +172,12 @@ rtc_shared_library("libwebrtc") {
     "include/helper.h",
     "src/helper.cc",
     "src/base/portable.cc",
+    "src/internal/session_tap.cc",
+    "src/internal/session_tap.h",
+    "src/internal/drift_servo.cc",
+    "src/internal/drift_servo.h",
+    "src/internal/self_echo_gate.cc",
+    "src/internal/self_echo_gate.h",
     "src/internal/custom_audio_transport_impl.cc",
     "src/internal/custom_audio_transport_impl.h",
     "src/internal/local_audio_track.cc",

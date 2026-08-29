@@ -1,7 +1,9 @@
 #ifndef INTERNAL_CUSTOM_AUDIO_TRANSPORT_STATE_H_
 #define INTERNAL_CUSTOM_AUDIO_TRANSPORT_STATE_H_
 
+#include <atomic>
 #include <map>
+#include <vector>
 #include <memory>
 
 #include "api/sequence_checker.h"
@@ -9,6 +11,9 @@
 #include "call/audio_sender.h"
 #include "call/audio_state.h"
 #include "rtc_base/containers/flat_set.h"
+#include "src/internal/drift_servo.h"
+#include "src/internal/session_tap.h"
+#include "src/internal/self_echo_gate.h"
 #include "rtc_base/ref_count.h"
 #include "rtc_base/task_utils/repeating_task.h"
 #include "rtc_base/thread_annotations.h"
@@ -59,8 +64,25 @@ class CustomAudioTransportImpl : public AudioTransport, public AudioSender {
 
   void SendAudioData(std::unique_ptr<AudioFrame> audio_frame) override;
 
+  // Diagnostics for wrapper/stats plumbing. Safe when features disabled.
+  bool drift_servo_enabled() const { return drift_servo_ != nullptr; }
+  bool self_echo_gate_enabled() const { return self_echo_gate_ != nullptr; }
+  DriftServo::Stats GetDriftServoStats() const;
+  SelfEchoGate::Stats GetSelfEchoGateStats() const;
+
  private:
   std::unique_ptr<webrtc::AudioTransportImpl> audio_transport_impl_;
+  // Telosnex AEC hardening (flag-gated, default off; see drift_servo.h and
+  // self_echo_gate.h for guarantees). Null when disabled.
+  std::unique_ptr<DriftServo> drift_servo_;
+  std::unique_ptr<SelfEchoGate> self_echo_gate_;
+  std::vector<int16_t> servo_block_;
+  std::atomic<int64_t> render_calls_{0};
+  std::atomic<int64_t> cap_legacy_calls_{0};
+  std::atomic<int64_t> cap_modern_calls_{0};
+  double seed_ppm_env_ = 0.0;
+  // Session tap v2 (TSNX_TAP_DIR): see session_tap.h for R1-R4.
+  std::unique_ptr<SessionTap> tap_;
   mutable Mutex capture_lock_;
   std::vector<AudioSender*> audio_senders_ RTC_GUARDED_BY(capture_lock_);
 };
