@@ -46,16 +46,22 @@ Replay through the real APM:
 
 ```bash
 tsnx_replay <bundle>                         # stock path
-tsnx_replay <bundle> --servo                 # estimator-driven servo
-tsnx_replay <bundle> --ratio -1700           # fixed-ratio comparison
+tsnx_replay <bundle> --servo                 # unseeded estimator
+tsnx_replay <bundle> --servo --seed -1700    # production seeded servo
+tsnx_replay <bundle> --ratio -1700           # independent fixed-ratio control
 tsnx_replay <bundle> --output /tmp/after.wav
 ```
 
-The tool emits per-second APM statistics on stdout and always writes a
-listenable post-AEC WAV. It accepts both tap-v2 bundles and the original
-canonical-WAV/tap-v1 evidence format. `TSNX_REPLAY_FULL=1` additionally routes
-the replay through the observer gate and a fresh RT-safe tap, useful under
-ASAN.
+The tool emits per-second APM and servo statistics as CSV on stdout and always
+writes a listenable post-AEC WAV. `--servo` starts the estimator unseeded;
+`--servo --seed <ppm>` exercises the production seed path; and `--ratio <ppm>`
+applies an independent immediate fixed-resampler control. The CSV records engagement state, measured/applied ppm, valid
+windows, and rejected anomalous windows, making estimator startup behavior
+visible rather than inferring it from audio alone.
+
+It accepts both tap-v2 bundles and the original canonical-WAV/tap-v1 evidence
+format. `TSNX_REPLAY_FULL=1` additionally routes the replay through the observer
+gate and a fresh RT-safe tap, useful under ASAN.
 
 ## Privacy
 

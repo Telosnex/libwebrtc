@@ -79,8 +79,13 @@ def main() -> None:
             text=True,
             env=env,
         )
-        if not result.stdout.startswith("t_s,mode,render_active,erl_db,erle_db\n"):
-            raise AssertionError(f"missing CSV header: {result.stdout[:100]!r}")
+        expected_header = (
+            "t_s,mode,render_active,erl_db,erle_db,servo_engaged,"
+            "servo_measured_ppm,servo_applied_ppm,servo_windows,"
+            "servo_anomalies\n"
+        )
+        if not result.stdout.startswith(expected_header):
+            raise AssertionError(f"missing CSV header: {result.stdout[:160]!r}")
         with wave.open(str(output), "rb") as wav:
             assert wav.getframerate() == RATE
             assert wav.getnchannels() == 1

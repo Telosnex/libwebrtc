@@ -4,7 +4,8 @@
 // readable for the original field evidence.
 //
 // Usage:
-//   tsnx_replay <dir> [--servo | --ratio <ppm>] [--output <wav>]
+//   tsnx_replay <dir> [--servo [--seed <ppm>] | --ratio <ppm>]
+//               [--output <wav>]
 //
 // The default output is <dir>/replay_after_aec_<mode>.wav. Per-second APM
 // statistics are emitted as CSV on stdout. Set TSNX_REPLAY_FULL=1 to exercise
@@ -249,14 +250,16 @@ struct Options {
   bool servo = false;
   bool fixed = false;
   double fixed_ppm = 0.0;
+  bool seed = false;
+  double seed_ppm = 0.0;
   std::string output;
 };
 
 Options ParseOptions(int argc, char** argv) {
   if (argc < 2) {
     Fail(
-        "usage: tsnx_replay <dir> [--servo | --ratio <ppm>] "
-        "[--output <wav>]");
+        "usage: tsnx_replay <dir> "
+        "[--servo [--seed <ppm>] | --ratio <ppm>] [--output <wav>]");
   }
   Options options;
   options.dir = argv[1];
@@ -270,6 +273,10 @@ Options ParseOptions(int argc, char** argv) {
         Fail("--ratio needs a value and cannot be combined with --servo");
       options.fixed = true;
       options.fixed_ppm = atof(argv[i]);
+    } else if (arg == "--seed") {
+      if (++i >= argc) Fail("--seed requires a ppm value");
+      options.seed = true;
+      options.seed_ppm = atof(argv[i]);
     } else if (arg == "--output") {
       if (++i >= argc) Fail("--output requires a path");
       options.output = argv[i];
@@ -277,8 +284,18 @@ Options ParseOptions(int argc, char** argv) {
       Fail("unknown option: " + arg);
     }
   }
-  const char* mode =
-      options.fixed ? "fixed" : (options.servo ? "servo" : "stock");
+  if (options.seed && !options.servo)
+    Fail("--seed requires --servo");
+  if (options.seed &&
+      (std::abs(options.seed_ppm) < webrtc::DriftServo::kEngagePpm ||
+       std::abs(options.seed_ppm) > webrtc::DriftServo::kMaxCorrectionPpm)) {
+    Fail("--seed is outside the production servo engagement rails");
+  }
+  const char* mode = options.fixed
+                         ? "fixed"
+                         : (options.seed
+                                ? "seeded"
+                                : (options.servo ? "servo" : "stock"));
   if (options.output.empty())
     options.output = options.dir + "/replay_after_aec_" + mode + ".wav";
   return options;
@@ -288,6 +305,11 @@ Options ParseOptions(int argc, char** argv) {
 
 int main(int argc, char** argv) {
   const Options options = ParseOptions(argc, argv);
+  const char* mode = options.fixed
+                         ? "fixed"
+                         : (options.seed
+                                ? "seeded"
+                                : (options.servo ? "servo" : "stock"));
   const BundleFormat format = LoadBundleFormat(options.dir);
   if (options.fixed &&
       (format.capture_raw.rate != 48000 || format.capture_raw.channels > 2)) {
@@ -323,8 +345,7 @@ int main(int argc, char** argv) {
   fprintf(stderr,
           "bundle=v%d events=%zu render/%zu capture mode=%s output=%s\n",
           format.v2 ? 2 : 1, render_events.size(), capture_events.size(),
-          options.fixed ? "fixed" : (options.servo ? "servo" : "stock"),
-          options.output.c_str());
+          mode, options.output.c_str());
 
   webrtc::AudioProcessing::Config config;
   config.echo_canceller.enabled = true;
@@ -343,6 +364,7 @@ int main(int argc, char** argv) {
   const size_t capture_block = format.capture_raw.rate / 100;
 
   webrtc::DriftServo servo;
+  if (options.seed) servo.SeedRatio(options.seed_ppm);
   std::unique_ptr<FixedResampler> fixed;
   if (options.fixed)
     fixed = std::make_unique<FixedResampler>(options.fixed_ppm);
@@ -384,7 +406,9 @@ int main(int argc, char** argv) {
     }
   };
 
-  printf("t_s,mode,render_active,erl_db,erle_db\n");
+  printf("t_s,mode,render_active,erl_db,erle_db,servo_engaged,"
+         "servo_measured_ppm,servo_applied_ppm,servo_windows,"
+         "servo_anomalies\n");
   for (const Event& event : events) {
     if (event.side == 'R') {
       const size_t count = event.frames * event.channels;
@@ -447,18 +471,32 @@ int main(int argc, char** argv) {
       const double erle = stats.echo_return_loss_enhancement.value_or(-99.0);
       const bool active =
           render_samples > 0 && render_energy / render_samples > 0.001;
-      printf("%.1f,%s,%d,%.2f,%.3f\n", next_report_us / 1e6,
-             options.fixed ? "fixed" : (options.servo ? "servo" : "stock"),
-             active, erl, erle);
+      const auto servo_stats = servo.GetStats();
+      printf("%.1f,%s,%d,%.2f,%.3f,%d,%.2f,%.2f,%lld,%lld\n",
+             next_report_us / 1e6,
+             mode, active, erl, erle, servo_stats.engaged,
+             servo_stats.measured_ppm, servo_stats.applied_ppm,
+             static_cast<long long>(servo_stats.windows),
+             static_cast<long long>(servo_stats.anomalies));
       next_report_us += 1000000;
       render_energy = 0.0;
       render_samples = 0;
     }
   }
 
+  const auto final_servo_stats = servo.GetStats();
   fprintf(stderr,
           "consumed render=%zu/%zu capture=%zu/%zu samples; wrote %s\n",
           render_position, render.size(), capture_position, capture.size(),
           options.output.c_str());
+  if (options.servo) {
+    fprintf(stderr,
+            "servo final: engaged=%d measured=%.2f ppm applied=%.2f ppm "
+            "windows=%lld anomalies=%lld\n",
+            final_servo_stats.engaged, final_servo_stats.measured_ppm,
+            final_servo_stats.applied_ppm,
+            static_cast<long long>(final_servo_stats.windows),
+            static_cast<long long>(final_servo_stats.anomalies));
+  }
   return 0;
 }
