@@ -4,8 +4,8 @@
 // readable for the original field evidence.
 //
 // Usage:
-//   tsnx_replay <dir> [--servo [--seed <ppm>] | --ratio <ppm>]
-//               [--output <wav>]
+//   tsnx_replay <dir> [--servo | --hw-servo] [--seed <ppm>]
+//               [--ratio <ppm>] [--output <wav>]
 //
 // The default output is <dir>/replay_after_aec_<mode>.wav. Per-second APM
 // statistics are emitted as CSV on stdout. Set TSNX_REPLAY_FULL=1 to exercise
@@ -39,7 +39,7 @@ struct StreamFormat {
 };
 
 struct BundleFormat {
-  bool v2 = false;
+  int version = 1;
   StreamFormat render;
   StreamFormat capture_raw;
   StreamFormat capture_apm;
@@ -52,6 +52,8 @@ struct Event {
   size_t frames = 0;
   uint32_t rate = 0;
   size_t channels = 0;
+  int64_t position_frames = 0;
+  uint32_t generation = 0;
 };
 
 [[noreturn]] void Fail(const std::string& message) {
@@ -101,7 +103,7 @@ BundleFormat LoadBundleFormat(const std::string& dir) {
   const std::string json = ReadText(dir + "/manifest.json");
   if (json.find("\"format\": \"s16le\"") == std::string::npos)
     Fail("unsupported manifest format (expected s16le)");
-  format.v2 = true;
+  format.version = static_cast<int>(ExtractNumber(json, "", "version"));
   format.render = {
       static_cast<uint32_t>(ExtractNumber(json, "render", "rate")),
       static_cast<size_t>(ExtractNumber(json, "render", "channels"))};
@@ -187,6 +189,27 @@ std::vector<Event> LoadLog(const std::string& path, char side,
   return events;
 }
 
+std::vector<Event> LoadHardwareLog(const std::string& path, char side) {
+  std::ifstream file(path);
+  if (!file) Fail("cannot open " + path);
+  std::vector<Event> events;
+  std::string line;
+  while (std::getline(file, line)) {
+    if (line.empty()) continue;
+    std::istringstream fields(line);
+    Event event;
+    event.side = side;
+    int64_t time_ns = 0;
+    if (!(fields >> time_ns >> event.position_frames >> event.rate >>
+          event.generation)) {
+      Fail("malformed hardware clock log: " + path);
+    }
+    event.us = time_ns / 1000;
+    events.push_back(event);
+  }
+  return events;
+}
+
 // Minimal constant-ratio stereo resampler for ceiling measurement.
 struct FixedResampler : webrtc::SincResamplerCallback {
   struct Channel : webrtc::SincResamplerCallback {
@@ -248,6 +271,7 @@ struct FixedResampler : webrtc::SincResamplerCallback {
 struct Options {
   std::string dir;
   bool servo = false;
+  bool hardware_servo = false;
   bool fixed = false;
   double fixed_ppm = 0.0;
   bool seed = false;
@@ -259,18 +283,24 @@ Options ParseOptions(int argc, char** argv) {
   if (argc < 2) {
     Fail(
         "usage: tsnx_replay <dir> "
-        "[--servo [--seed <ppm>] | --ratio <ppm>] [--output <wav>]");
+        "[--servo | --hw-servo] [--seed <ppm>] [--ratio <ppm>] "
+        "[--output <wav>]");
   }
   Options options;
   options.dir = argv[1];
   for (int i = 2; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--servo") {
-      if (options.fixed) Fail("--servo and --ratio are mutually exclusive");
+      if (options.fixed || options.hardware_servo)
+        Fail("--servo, --hw-servo, and --ratio are mutually exclusive");
       options.servo = true;
+    } else if (arg == "--hw-servo") {
+      if (options.fixed || options.servo)
+        Fail("--servo, --hw-servo, and --ratio are mutually exclusive");
+      options.hardware_servo = true;
     } else if (arg == "--ratio") {
-      if (options.servo || ++i >= argc)
-        Fail("--ratio needs a value and cannot be combined with --servo");
+      if (options.servo || options.hardware_servo || ++i >= argc)
+        Fail("--ratio needs a value and cannot be combined with a servo");
       options.fixed = true;
       options.fixed_ppm = atof(argv[i]);
     } else if (arg == "--seed") {
@@ -284,18 +314,20 @@ Options ParseOptions(int argc, char** argv) {
       Fail("unknown option: " + arg);
     }
   }
-  if (options.seed && !options.servo)
-    Fail("--seed requires --servo");
+  if (options.seed && !options.servo && !options.hardware_servo)
+    Fail("--seed requires --servo or --hw-servo");
   if (options.seed &&
       (std::abs(options.seed_ppm) < webrtc::DriftServo::kEngagePpm ||
        std::abs(options.seed_ppm) > webrtc::DriftServo::kMaxCorrectionPpm)) {
     Fail("--seed is outside the production servo engagement rails");
   }
-  const char* mode = options.fixed
-                         ? "fixed"
-                         : (options.seed
-                                ? "seeded"
-                                : (options.servo ? "servo" : "stock"));
+  const char* mode =
+      options.fixed
+          ? "fixed"
+          : (options.hardware_servo
+                 ? (options.seed ? "hw_seeded" : "hw_servo")
+                 : (options.seed ? "seeded"
+                                 : (options.servo ? "servo" : "stock")));
   if (options.output.empty())
     options.output = options.dir + "/replay_after_aec_" + mode + ".wav";
   return options;
@@ -305,47 +337,63 @@ Options ParseOptions(int argc, char** argv) {
 
 int main(int argc, char** argv) {
   const Options options = ParseOptions(argc, argv);
-  const char* mode = options.fixed
-                         ? "fixed"
-                         : (options.seed
-                                ? "seeded"
-                                : (options.servo ? "servo" : "stock"));
+  const char* mode =
+      options.fixed
+          ? "fixed"
+          : (options.hardware_servo
+                 ? (options.seed ? "hw_seeded" : "hw_servo")
+                 : (options.seed ? "seeded"
+                                 : (options.servo ? "servo" : "stock")));
   const BundleFormat format = LoadBundleFormat(options.dir);
   if (options.fixed &&
       (format.capture_raw.rate != 48000 || format.capture_raw.channels > 2)) {
     Fail("--ratio currently requires 48 kHz capture with 1-2 channels");
   }
 
-  const size_t header = format.v2 ? 0 : 44;
+  const bool pcm_bundle = format.version >= 2;
+  const size_t header = pcm_bundle ? 0 : 44;
   const auto render = LoadPcm16(
-      options.dir + (format.v2 ? "/render.pcm" : "/render.wav"), header);
+      options.dir + (pcm_bundle ? "/render.pcm" : "/render.wav"), header);
   const auto capture = LoadPcm16(
-      options.dir + (format.v2 ? "/capture_raw.pcm" : "/capture_raw.wav"),
+      options.dir + (pcm_bundle ? "/capture_raw.pcm" : "/capture_raw.wav"),
       header);
   auto render_events =
-      LoadLog(options.dir + "/render.log", 'R', format.render, format.v2);
+      LoadLog(options.dir + "/render.log", 'R', format.render, pcm_bundle);
   auto capture_events =
-      LoadLog(options.dir + (format.v2 ? "/capture_raw.log" : "/capture.log"),
-              'C', format.capture_raw, format.v2);
+      LoadLog(options.dir + (pcm_bundle ? "/capture_raw.log" : "/capture.log"),
+              'C', format.capture_raw, pcm_bundle);
+
+  std::vector<Event> hardware_playout_events;
+  std::vector<Event> hardware_capture_events;
+  if (format.version >= 3) {
+    hardware_playout_events =
+        LoadHardwareLog(options.dir + "/playout_hw.log", 'P');
+    hardware_capture_events =
+        LoadHardwareLog(options.dir + "/capture_hw.log", 'H');
+  }
+  if (options.hardware_servo &&
+      (hardware_playout_events.empty() || hardware_capture_events.empty())) {
+    Fail("--hw-servo requires non-empty tap-v3 hardware clock logs");
+  }
 
   std::vector<Event> events;
-  events.reserve(render_events.size() + capture_events.size());
-  size_t render_event = 0;
-  size_t capture_event = 0;
-  while (render_event < render_events.size() ||
-         capture_event < capture_events.size()) {
-    if (capture_event >= capture_events.size() ||
-        (render_event < render_events.size() &&
-         render_events[render_event].us <= capture_events[capture_event].us)) {
-      events.push_back(render_events[render_event++]);
-    } else {
-      events.push_back(capture_events[capture_event++]);
-    }
-  }
+  events.reserve(render_events.size() + capture_events.size() +
+                 hardware_playout_events.size() +
+                 hardware_capture_events.size());
+  events.insert(events.end(), render_events.begin(), render_events.end());
+  events.insert(events.end(), capture_events.begin(), capture_events.end());
+  events.insert(events.end(), hardware_playout_events.begin(),
+                hardware_playout_events.end());
+  events.insert(events.end(), hardware_capture_events.begin(),
+                hardware_capture_events.end());
+  std::stable_sort(events.begin(), events.end(),
+                   [](const Event& a, const Event& b) { return a.us < b.us; });
   fprintf(stderr,
-          "bundle=v%d events=%zu render/%zu capture mode=%s output=%s\n",
-          format.v2 ? 2 : 1, render_events.size(), capture_events.size(),
-          mode, options.output.c_str());
+          "bundle=v%d audio=%zu render/%zu capture hw=%zu/%zu mode=%s "
+          "output=%s\n",
+          format.version, render_events.size(), capture_events.size(),
+          hardware_playout_events.size(), hardware_capture_events.size(), mode,
+          options.output.c_str());
 
   webrtc::AudioProcessing::Config config;
   config.echo_canceller.enabled = true;
@@ -364,6 +412,9 @@ int main(int argc, char** argv) {
   const size_t capture_block = format.capture_raw.rate / 100;
 
   webrtc::DriftServo servo;
+  if (options.hardware_servo) {
+    servo.SetHardwareClockMode(webrtc::DriftServo::HardwareClockMode::kControl);
+  }
   if (options.seed) servo.SeedRatio(options.seed_ppm);
   std::unique_ptr<FixedResampler> fixed;
   if (options.fixed)
@@ -373,10 +424,9 @@ int main(int argc, char** argv) {
   const bool full = full_root != nullptr;
   std::unique_ptr<webrtc::SessionTap> full_tap;
   if (full) {
-    const std::string root =
-        full_root[0] && strcmp(full_root, "1") != 0
-            ? full_root
-            : "/tmp/tsnx_replay_tap";
+    const std::string root = full_root[0] && strcmp(full_root, "1") != 0
+                                 ? full_root
+                                 : "/tmp/tsnx_replay_tap";
     full_tap = webrtc::SessionTap::Create(root, format.seed_ppm);
   }
 
@@ -406,10 +456,25 @@ int main(int argc, char** argv) {
     }
   };
 
-  printf("t_s,mode,render_active,erl_db,erle_db,servo_engaged,"
-         "servo_measured_ppm,servo_applied_ppm,servo_windows,"
-         "servo_anomalies\n");
+  printf(
+      "t_s,mode,render_active,erl_db,erle_db,servo_engaged,"
+      "servo_measured_ppm,servo_applied_ppm,servo_windows,"
+      "servo_anomalies,hw_ready,hw_controlling,hw_measured_ppm,"
+      "hw_uncertainty_ppm,hw_span_s,hw_estimates,hw_resets,"
+      "hw_rejected\n");
   for (const Event& event : events) {
+    if (event.side == 'P' || event.side == 'H') {
+      if (options.hardware_servo) {
+        const webrtc::AudioHardwareClockObservation observation = {
+            event.side == 'P' ? webrtc::AudioHardwareClockDirection::kPlayout
+                              : webrtc::AudioHardwareClockDirection::kCapture,
+            event.us * 1000, event.position_frames, event.rate,
+            event.generation};
+        servo.OnHardwareClockObservation(observation);
+        if (full_tap) full_tap->PushHardwareClockObservation(observation);
+      }
+      continue;
+    }
     if (event.side == 'R') {
       const size_t count = event.frames * event.channels;
       if (render_position + count > render.size())
@@ -425,7 +490,8 @@ int main(int argc, char** argv) {
           webrtc::AudioProcessing::kNoError) {
         Fail("APM rejected a render block");
       }
-      if (options.servo) servo.OnRenderFrames(event.frames, event.rate);
+      if (options.servo || options.hardware_servo)
+        servo.OnRenderFrames(event.frames, event.rate);
       if (full) {
         gate.PushRender(render_buffer.data(), event.frames, event.rate,
                         event.channels);
@@ -449,7 +515,7 @@ int main(int argc, char** argv) {
           if (!fixed->Pop(corrected.data(), event.channels)) break;
           process_capture(corrected.data(), event.us);
         }
-      } else if (options.servo) {
+      } else if (options.servo || options.hardware_servo) {
         const size_t blocks = servo.PushCaptureAndCorrect(
             input, event.frames, event.rate, event.channels);
         if (servo.engaged()) {
@@ -472,12 +538,20 @@ int main(int argc, char** argv) {
       const bool active =
           render_samples > 0 && render_energy / render_samples > 0.001;
       const auto servo_stats = servo.GetStats();
-      printf("%.1f,%s,%d,%.2f,%.3f,%d,%.2f,%.2f,%lld,%lld\n",
-             next_report_us / 1e6,
-             mode, active, erl, erle, servo_stats.engaged,
-             servo_stats.measured_ppm, servo_stats.applied_ppm,
-             static_cast<long long>(servo_stats.windows),
-             static_cast<long long>(servo_stats.anomalies));
+      printf(
+          "%.1f,%s,%d,%.2f,%.3f,%d,%.2f,%.2f,%lld,%lld,%d,%d,"
+          "%.2f,%.2f,%.2f,%lld,%lld,%lld\n",
+          next_report_us / 1e6, mode, active, erl, erle, servo_stats.engaged,
+          servo_stats.measured_ppm, servo_stats.applied_ppm,
+          static_cast<long long>(servo_stats.windows),
+          static_cast<long long>(servo_stats.anomalies),
+          servo_stats.hardware_ready, servo_stats.hardware_controlling,
+          servo_stats.hardware_measured_ppm,
+          servo_stats.hardware_uncertainty_ppm,
+          servo_stats.hardware_span_seconds,
+          static_cast<long long>(servo_stats.hardware_estimates),
+          static_cast<long long>(servo_stats.hardware_resets),
+          static_cast<long long>(servo_stats.hardware_rejected));
       next_report_us += 1000000;
       render_energy = 0.0;
       render_samples = 0;
@@ -485,18 +559,23 @@ int main(int argc, char** argv) {
   }
 
   const auto final_servo_stats = servo.GetStats();
-  fprintf(stderr,
-          "consumed render=%zu/%zu capture=%zu/%zu samples; wrote %s\n",
+  fprintf(stderr, "consumed render=%zu/%zu capture=%zu/%zu samples; wrote %s\n",
           render_position, render.size(), capture_position, capture.size(),
           options.output.c_str());
-  if (options.servo) {
+  if (options.servo || options.hardware_servo) {
     fprintf(stderr,
             "servo final: engaged=%d measured=%.2f ppm applied=%.2f ppm "
-            "windows=%lld anomalies=%lld\n",
+            "windows=%lld anomalies=%lld hw_ready=%d hw_control=%d "
+            "hw=%.2f+/-%.2f ppm span=%.2f s\n",
             final_servo_stats.engaged, final_servo_stats.measured_ppm,
             final_servo_stats.applied_ppm,
             static_cast<long long>(final_servo_stats.windows),
-            static_cast<long long>(final_servo_stats.anomalies));
+            static_cast<long long>(final_servo_stats.anomalies),
+            final_servo_stats.hardware_ready,
+            final_servo_stats.hardware_controlling,
+            final_servo_stats.hardware_measured_ppm,
+            final_servo_stats.hardware_uncertainty_ppm,
+            final_servo_stats.hardware_span_seconds);
   }
   return 0;
 }

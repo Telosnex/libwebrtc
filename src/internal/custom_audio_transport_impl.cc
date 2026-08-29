@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 
 #include "rtc_base/logging.h"
@@ -13,6 +14,19 @@ bool EnvFlag(const char* name) {
   const char* v = std::getenv(name);
   return v && v[0] == '1';
 }
+
+DriftServo::HardwareClockMode HardwareClockModeFromEnvironment() {
+  const char* value = std::getenv("TSNX_HW_CLOCK_SERVO");
+  if (!value || !value[0]) return DriftServo::HardwareClockMode::kDisabled;
+  if (strcmp(value, "observe") == 0)
+    return DriftServo::HardwareClockMode::kObserve;
+  if (strcmp(value, "1") == 0 || strcmp(value, "control") == 0)
+    return DriftServo::HardwareClockMode::kControl;
+  fprintf(stderr,
+          "TSNX: invalid TSNX_HW_CLOCK_SERVO=%s (use observe or control)\n",
+          value);
+  return DriftServo::HardwareClockMode::kDisabled;
+}
 }  // namespace
 
 CustomAudioTransportImpl::CustomAudioTransportImpl(
@@ -20,9 +34,18 @@ CustomAudioTransportImpl::CustomAudioTransportImpl(
     AsyncAudioProcessing::Factory* async_audio_processing_factory)
     : audio_transport_impl_(std::make_unique<webrtc::AudioTransportImpl>(
           mixer, audio_processing, async_audio_processing_factory)) {
-  if (EnvFlag("TSNX_DRIFT_SERVO")) {
+  const auto hardware_clock_mode = HardwareClockModeFromEnvironment();
+  if (EnvFlag("TSNX_DRIFT_SERVO") ||
+      hardware_clock_mode != DriftServo::HardwareClockMode::kDisabled) {
     drift_servo_ = std::make_unique<DriftServo>();
-    RTC_LOG(LS_INFO) << "TSNX: drift servo enabled (observing)";
+    drift_servo_->SetHardwareClockMode(hardware_clock_mode);
+    RTC_LOG(LS_INFO) << "TSNX: drift servo enabled";
+    if (hardware_clock_mode != DriftServo::HardwareClockMode::kDisabled) {
+      fprintf(stderr, "TSNX: hardware clock servo %s\n",
+              hardware_clock_mode == DriftServo::HardwareClockMode::kControl
+                  ? "control"
+                  : "observe");
+    }
     if (const char* s = std::getenv("TSNX_DRIFT_PPM"); s && s[0]) {
       seed_ppm_env_ = atof(s);
       drift_servo_->SeedRatio(seed_ppm_env_);
@@ -44,6 +67,12 @@ DriftServo::Stats CustomAudioTransportImpl::GetDriftServoStats() const {
 
 SelfEchoGate::Stats CustomAudioTransportImpl::GetSelfEchoGateStats() const {
   return self_echo_gate_ ? self_echo_gate_->GetStats() : SelfEchoGate::Stats();
+}
+
+void CustomAudioTransportImpl::OnAudioHardwareClockObservation(
+    const AudioHardwareClockObservation& observation) {
+  if (drift_servo_) drift_servo_->OnHardwareClockObservation(observation);
+  if (tap_) tap_->PushHardwareClockObservation(observation);
 }
 
 // TODO(bugs.webrtc.org/13620) Deprecate this function
@@ -139,15 +168,25 @@ int32_t CustomAudioTransportImpl::NeedMorePlayData(
         // stderr as well: journald captures it even without an RTC log sink.
         fprintf(stderr,
                 "TSNX drift: measured %.0f ppm applied %.0f engaged %d"
-                " windows %lld anomalies %lld cap_l %lld cap_m %lld\n",
+                " windows %lld anomalies %lld hw_ready %d hw_control %d"
+                " hw %.0f+/-%.0f ppm span %.1f estimates %lld resets %lld"
+                " rejected %lld cap_l %lld cap_m %lld\n",
                 s.measured_ppm, s.applied_ppm, s.engaged, (long long)s.windows,
-                (long long)s.anomalies,
+                (long long)s.anomalies, s.hardware_ready,
+                s.hardware_controlling, s.hardware_measured_ppm,
+                s.hardware_uncertainty_ppm, s.hardware_span_seconds,
+                (long long)s.hardware_estimates, (long long)s.hardware_resets,
+                (long long)s.hardware_rejected,
                 (long long)cap_legacy_calls_.load(std::memory_order_relaxed),
                 (long long)cap_modern_calls_.load(std::memory_order_relaxed));
         RTC_LOG(LS_INFO) << "TSNX drift: measured " << s.measured_ppm
                          << " ppm, applied " << s.applied_ppm
                          << " ppm, engaged " << s.engaged << ", windows "
-                         << s.windows << ", anomalies " << s.anomalies;
+                         << s.windows << ", anomalies " << s.anomalies
+                         << ", hw " << s.hardware_measured_ppm << " +/- "
+                         << s.hardware_uncertainty_ppm << " ppm, ready "
+                         << s.hardware_ready << ", control "
+                         << s.hardware_controlling;
       }
       if (self_echo_gate_) {
         const auto g = self_echo_gate_->GetStats();

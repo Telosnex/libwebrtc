@@ -5,16 +5,16 @@
 // relative drift (measured: -1700 ppm on reference unit, 2026-08-27), which
 // prevents the AEC3 linear filter from ever converging (ERLE ~0.2 dB).
 //
-// APPROACH: The transport layer sees both streams' true pacing:
-//   - NeedMorePlayData pulls are paced by the PLAYOUT hardware clock.
-//   - RecordedDataIsAvailable pushes are paced by the CAPTURE hardware clock.
-// Counting frames (normalized to nominal seconds) on both sides over long
-// windows yields the relative clock ratio without any device-specific API.
-// A slew-limited SincResampler (Chrome's variable-rate resampler, built for
-// exactly this job) re-times capture onto the render clock before the APM.
+// APPROACH: Linux ALSA supplies hw_ptr-equivalent positions for capture and
+// playout against CLOCK_MONOTONIC. HardwareClockEstimator regresses each
+// device's normalized sample rate and this class re-times capture onto render
+// with Chrome's variable-rate SincResampler. The original callback-frame
+// estimator remains a platform/failure fallback; a pinned seed can bridge the
+// first hardware-estimator window and is superseded once hardware confidence
+// is established.
 //
 // GUARANTEES (fleet-free, by construction):
-//   G1 If |measured drift| < kEngageppm, the resampler NEVER engages and the
+//   G1 If |measured drift| < kEngagePpm, the resampler NEVER engages and the
 //      byte path is identical to a build without this class (bit-exact).
 //   G2 Correction ratio is clamped to +/-kMaxCorrectionPpm and slewed at
 //      <= kMaxSlewPpmPerUpdate per estimator update; anomalous measurements
@@ -32,30 +32,43 @@
 
 #include "common_audio/resampler/sinc_resampler.h"
 #include "rtc_base/synchronization/mutex.h"
+#include "src/internal/hardware_clock_estimator.h"
 
 namespace webrtc {
 
 class DriftServo {
  public:
   struct Stats {
-    double measured_ppm = 0.0;   // raw relative drift estimate
-    double applied_ppm = 0.0;    // current resampler correction
+    double measured_ppm = 0.0;  // raw relative drift estimate
+    double applied_ppm = 0.0;   // current resampler correction
     bool engaged = false;
-    int64_t windows = 0;         // completed estimator windows
-    int64_t anomalies = 0;       // rejected measurements
+    int64_t windows = 0;    // completed callback estimator windows
+    int64_t anomalies = 0;  // rejected callback measurements
+    bool hardware_ready = false;
+    bool hardware_controlling = false;
+    double hardware_measured_ppm = 0.0;
+    double hardware_uncertainty_ppm = 0.0;
+    double hardware_span_seconds = 0.0;
+    int64_t hardware_estimates = 0;
+    int64_t hardware_resets = 0;
+    int64_t hardware_rejected = 0;
   };
 
+  enum class HardwareClockMode { kDisabled, kObserve, kControl };
+
   DriftServo();
-  // Seed a known device-pair ratio (e.g. from persisted self-test): engage
-  // immediately at the seeded correction. The frame-count estimator then
-  // acts only as a gross-anomaly watchdog (disengages if the measured
-  // ratio ever contradicts the seed by more than kSeedVetoPpm with high
-  // confidence), because arrival-time noise from deep capture buffering
-  // makes fine frame-count measurement unreliable (see field session 3).
+  // Engage immediately at a known device-pair ratio. In hardware-control
+  // mode this is only a startup fallback and is superseded after three
+  // confident hardware estimates. Without hardware observations, the callback
+  // estimator remains a log-only gross-anomaly watchdog for the seed.
   void SeedRatio(double ppm);
+  void SetHardwareClockMode(HardwareClockMode mode);
+  void OnHardwareClockObservation(
+      const AudioHardwareClockObservation& observation);
   ~DriftServo();
 
-  // Render side: call with frames delivered / nominal rate for that call.
+  // Render side: callback-frame fallback. Call with frames delivered / nominal
+  // rate for that callback.
   void OnRenderFrames(size_t frames, uint32_t sample_rate_hz);
 
   // Capture side. Input: interleaved S16, mono only (bypasses otherwise).
@@ -77,10 +90,14 @@ class DriftServo {
   static constexpr double kMaxSlewPpmPerUpdate = 100.0;
   static constexpr double kWindowSeconds = 10.0;
   static constexpr int kEngageConsecutiveWindows = 3;
+  static constexpr int kHardwareConsecutiveEstimates = 3;
+  static constexpr double kHardwareMaxUncertaintyPpm = 250.0;
   static constexpr size_t kMaxFifoFrames = 48 * 30;  // 30 ms @48k
 
  private:
   void UpdateEstimate();  // called with lock held, at window boundaries
+  void ApplyHardwareEstimate(const HardwareClockEstimator::Estimate& estimate)
+      RTC_EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
   mutable Mutex lock_;
   // Frame accounting, in nominal seconds (frames / nominal_rate).
@@ -99,6 +116,17 @@ class DriftServo {
   int64_t anomalies_ RTC_GUARDED_BY(lock_) = 0;
   bool have_estimate_ RTC_GUARDED_BY(lock_) = false;
   bool seeded_ RTC_GUARDED_BY(lock_) = false;
+
+  HardwareClockEstimator hardware_estimator_ RTC_GUARDED_BY(lock_);
+  HardwareClockMode hardware_mode_ RTC_GUARDED_BY(lock_) =
+      HardwareClockMode::kDisabled;
+  bool hardware_ready_ RTC_GUARDED_BY(lock_) = false;
+  bool hardware_controlling_ RTC_GUARDED_BY(lock_) = false;
+  double hardware_measured_ppm_ RTC_GUARDED_BY(lock_) = 0.0;
+  double hardware_uncertainty_ppm_ RTC_GUARDED_BY(lock_) = 0.0;
+  double hardware_span_seconds_ RTC_GUARDED_BY(lock_) = 0.0;
+  int hardware_consecutive_ RTC_GUARDED_BY(lock_) = 0;
+  int64_t hardware_estimates_ RTC_GUARDED_BY(lock_) = 0;
 
   // Per-channel resampler + FIFOs (capture thread only). Mono and stereo
   // capture are both supported; channels share one measured ratio.

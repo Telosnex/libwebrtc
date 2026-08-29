@@ -1,67 +1,89 @@
 # Telosnex AEC guarantees and replay
 
-This directory owns the release-gated checks for the Telosnex split-clock AEC
+This directory owns the release-gated checks for Telosnex split-clock AEC
 hardening.
 
 ## Automated guarantees
 
-`aec_guarantees.test.cc` generates deterministic PCM fixtures in memory and
-checks:
+`aec_guarantees.test.cc` uses generated fixtures to check:
 
-- an in-spec clock never engages the resampler;
-- a large clock mismatch engages while correction remains clamped;
-- seed acceptance/rejection rails;
-- pure self-echo closes the observer gate and render silence reopens it;
-- near-end-only audio never closes the gate and input audio is not mutated;
-- strong double-talk reopens a previously closed gate;
-- tap-v2 writes all three stream formats, the immutable seed, pacing data, and
-  the expected PCM byte counts.
+- ALSA hardware-position regression converges on 1 ms-quantized counters in
+  about 3.5 seconds;
+- counter generations invalidate windows across XRUN/recovery;
+- observe mode cannot change audio correction;
+- control mode engages large drift without a seed and never engages in-spec
+  hardware;
+- a startup seed is superseded by a confident hardware estimate;
+- callback-estimator engagement and correction rails remain available as a
+  fallback;
+- self-echo gate close/open/double-talk behavior;
+- tap-v3 atomically records all audio formats, immutable seed, PCM, pacing, and
+  both hardware-clock streams.
 
-The Linux release build compiles this target for x64 and ARM64 and executes it
-on x64. It also compiles `tsnx_replay` on both architectures. On x64,
-`smoke_replay.py` creates a complete tap-v2 bundle using only generated audio,
-runs the real APM replay, and validates the emitted WAV.
+The Linux release build compiles the guarantees and replay tool for x64 and
+ARM64, executes the guarantees on x64, and runs `smoke_replay.py`. The smoke
+test generates a complete tap-v3 bundle, obtains hardware-servo control through
+the real estimator, runs the real APM, and validates the output WAV. No customer
+audio is stored in git.
 
-The generated fixtures enforce structural behavior without storing customer
-microphone recordings in git. Historical field recordings remain private
-postmortem evidence; they are not CI dependencies.
+## ALSA hardware observations
+
+ALSA keeps `hw_ptr` opaque in its public API. The ADM derives an equivalent,
+unwrapped position from an atomic `snd_pcm_status` snapshot:
+
+```text
+playout hardware position = successful written frames - status delay
+capture hardware position = successful read frames + status delay
+```
+
+Each position is paired with `CLOCK_MONOTONIC`. A generation changes after
+prepare/XRUN recovery, preventing a fit from crossing a counter discontinuity.
+The estimator separately regresses normalized capture and playout rates against
+the same clock and passes their ratio to the existing bounded resampler.
+
+Runtime modes:
+
+```text
+TSNX_HW_CLOCK_SERVO=observe   # estimate/log only; cannot alter correction
+TSNX_HW_CLOCK_SERVO=control   # estimator may own bounded correction
+TSNX_DRIFT_PPM=-1700          # optional startup fallback until hardware control
+```
 
 ## Deterministic field replay
 
-A tap-v2 bundle contains:
+A tap-v3 bundle contains:
 
 ```text
 manifest.json
 render.pcm             render.log
 capture_raw.pcm        capture_raw.log
 capture_apm.pcm        capture_apm.log
+playout_hw.log         capture_hw.log
 ```
 
-PCM is headerless signed 16-bit little-endian. Logs contain `t_us frames`.
-One directory covers one recorder/transport lifetime; timing gaps in the logs
-preserve boundaries between calls. Restart the process before recording when a
-single-call directory is desired.
+PCM is headerless signed 16-bit little-endian. Audio logs contain `t_us frames`.
+Hardware logs contain `t_ns position_frames rate generation`. One directory
+covers one recorder/transport lifetime; timing gaps preserve call boundaries.
 
 Replay through the real APM:
 
 ```bash
 tsnx_replay <bundle>                         # stock path
-tsnx_replay <bundle> --servo                 # unseeded estimator
-tsnx_replay <bundle> --servo --seed -1700    # production seeded servo
-tsnx_replay <bundle> --ratio -1700           # independent fixed-ratio control
+tsnx_replay <bundle> --servo                 # unseeded callback fallback
+tsnx_replay <bundle> --servo --seed -1700    # callback path with seed
+tsnx_replay <bundle> --hw-servo              # recorded hardware positions
+tsnx_replay <bundle> --hw-servo --seed -1700 # production startup fallback
+tsnx_replay <bundle> --ratio -1700           # independent fixed control
 tsnx_replay <bundle> --output /tmp/after.wav
 ```
 
-The tool emits per-second APM and servo statistics as CSV on stdout and always
-writes a listenable post-AEC WAV. `--servo` starts the estimator unseeded;
-`--servo --seed <ppm>` exercises the production seed path; and `--ratio <ppm>`
-applies an independent immediate fixed-resampler control. The CSV records engagement state, measured/applied ppm, valid
-windows, and rejected anomalous windows, making estimator startup behavior
-visible rather than inferring it from audio alone.
+CSV output includes APM statistics, correction state, hardware estimate and
+uncertainty, fit span, estimate count, counter resets, and rejected data.
+Tap-v2 and original canonical-WAV/tap-v1 evidence remain readable, but only
+v3 bundles contain the observations required by `--hw-servo`.
 
-It accepts both tap-v2 bundles and the original canonical-WAV/tap-v1 evidence
-format. `TSNX_REPLAY_FULL=1` additionally routes the replay through the observer
-gate and a fresh RT-safe tap, useful under ASAN.
+`TSNX_REPLAY_FULL=1` additionally routes replay through the observer gate and a
+fresh RT-safe tap, useful under ASAN.
 
 ## Privacy
 

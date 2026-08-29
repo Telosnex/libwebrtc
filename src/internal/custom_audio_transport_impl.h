@@ -3,20 +3,20 @@
 
 #include <atomic>
 #include <map>
-#include <vector>
 #include <memory>
+#include <vector>
 
 #include "api/sequence_checker.h"
 #include "audio/audio_transport_impl.h"
 #include "call/audio_sender.h"
 #include "call/audio_state.h"
 #include "rtc_base/containers/flat_set.h"
-#include "src/internal/drift_servo.h"
-#include "src/internal/session_tap.h"
-#include "src/internal/self_echo_gate.h"
 #include "rtc_base/ref_count.h"
 #include "rtc_base/task_utils/repeating_task.h"
 #include "rtc_base/thread_annotations.h"
+#include "src/internal/drift_servo.h"
+#include "src/internal/self_echo_gate.h"
+#include "src/internal/session_tap.h"
 
 namespace webrtc {
 
@@ -40,6 +40,9 @@ class CustomAudioTransportImpl : public AudioTransport, public AudioSender {
       int32_t clockDrift, uint32_t currentMicLevel, bool keyPressed,
       uint32_t& newMicLevel,
       std::optional<int64_t> estimated_capture_time_ns) override;
+
+  void OnAudioHardwareClockObservation(
+      const AudioHardwareClockObservation& observation) override;
 
   int32_t NeedMorePlayData(size_t nSamples, size_t nBytesPerSample,
                            size_t nChannels, uint32_t samplesPerSec,

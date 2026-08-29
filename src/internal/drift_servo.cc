@@ -47,6 +47,7 @@ void DriftServo::UpdateEstimate() RTC_EXCLUSIVE_LOCKS_REQUIRED(lock_) {
   smoothed_ratio_ = valid_capture_sum_ / valid_render_sum_;
   have_estimate_ = true;
   const double drift_ppm = (smoothed_ratio_ - 1.0) * 1e6;
+  if (hardware_controlling_) return;
   if (seeded_) {
     // Log-only watchdog: a wrong seed is bounded-harm (clamped correction,
     // worst case == uncorrected baseline), so observe, never auto-toggle.
@@ -98,6 +99,89 @@ void DriftServo::UpdateEstimate() RTC_EXCLUSIVE_LOCKS_REQUIRED(lock_) {
                    << " ppm, smoothed " << drift_ppm << " ppm, applied "
                    << (applied_ratio_ - 1.0) * 1e6 << " ppm, engaged "
                    << engaged_.load(std::memory_order_relaxed);
+}
+
+void DriftServo::SetHardwareClockMode(HardwareClockMode mode) {
+  MutexLock l(&lock_);
+  hardware_mode_ = mode;
+  hardware_estimator_.Reset();
+  hardware_ready_ = false;
+  hardware_controlling_ = false;
+  hardware_consecutive_ = 0;
+  hardware_estimates_ = 0;
+}
+
+void DriftServo::OnHardwareClockObservation(
+    const AudioHardwareClockObservation& observation) {
+  MutexLock l(&lock_);
+  if (hardware_mode_ == HardwareClockMode::kDisabled) return;
+  const auto update = hardware_estimator_.Add(observation);
+  if (update.reset || update.rejected) hardware_consecutive_ = 0;
+  if (!update.estimate) return;
+
+  const auto& estimate = *update.estimate;
+  hardware_ready_ = true;
+  hardware_measured_ppm_ = estimate.relative_ppm;
+  hardware_uncertainty_ppm_ = estimate.uncertainty_ppm;
+  hardware_span_seconds_ = estimate.span_seconds;
+  ++hardware_estimates_;
+  RTC_LOG(LS_INFO) << "DriftServo hw clock: measured " << hardware_measured_ppm_
+                   << " +/- " << hardware_uncertainty_ppm_ << " ppm over "
+                   << hardware_span_seconds_ << " s";
+
+  if (hardware_mode_ != HardwareClockMode::kControl) return;
+  if (std::abs(estimate.relative_ppm) > kAnomalyPpm ||
+      estimate.uncertainty_ppm > kHardwareMaxUncertaintyPpm) {
+    hardware_consecutive_ = 0;
+    return;
+  }
+
+  // A seed is only a startup bridge: any stable hardware estimate may replace
+  // it, including an in-spec estimate that correctly drives a bad seed to zero.
+  const bool correction_confident =
+      std::abs(estimate.relative_ppm) - estimate.uncertainty_ppm > kEngagePpm;
+  if (!hardware_controlling_) {
+    if (seeded_ || correction_confident) {
+      ++hardware_consecutive_;
+    } else {
+      hardware_consecutive_ = 0;
+    }
+    if (hardware_consecutive_ < kHardwareConsecutiveEstimates) return;
+    hardware_controlling_ = true;
+    seeded_ = false;
+    RTC_LOG(LS_WARNING) << "DriftServo hardware clock CONTROL at "
+                        << estimate.relative_ppm << " ppm";
+  }
+  ApplyHardwareEstimate(estimate);
+}
+
+void DriftServo::ApplyHardwareEstimate(
+    const HardwareClockEstimator::Estimate& estimate) {
+  hardware_measured_ppm_ = estimate.relative_ppm;
+  const bool in_spec =
+      std::abs(estimate.relative_ppm) + estimate.uncertainty_ppm <
+      kDisengagePpm;
+  const double target = in_spec ? 1.0
+                                : std::clamp(1.0 + estimate.relative_ppm * 1e-6,
+                                             1.0 - kMaxCorrectionPpm * 1e-6,
+                                             1.0 + kMaxCorrectionPpm * 1e-6);
+  const bool currently = engaged_.load(std::memory_order_relaxed);
+  if (!currently && !in_spec) {
+    applied_ratio_ = target;
+    engaged_.store(true, std::memory_order_relaxed);
+    RTC_LOG(LS_WARNING) << "DriftServo hardware ENGAGED (snap): "
+                        << estimate.relative_ppm << " ppm";
+    return;
+  }
+  if (!currently) return;
+
+  const double max_step = kMaxSlewPpmPerUpdate * 1e-6;
+  applied_ratio_ += std::clamp(target - applied_ratio_, -max_step, max_step);
+  if (in_spec && std::abs(applied_ratio_ - 1.0) < 1e-9) {
+    applied_ratio_ = 1.0;
+    engaged_.store(false, std::memory_order_relaxed);
+    RTC_LOG(LS_WARNING) << "DriftServo hardware disengaged in-spec";
+  }
 }
 
 size_t DriftServo::PushCaptureAndCorrect(const int16_t* samples, size_t frames,
@@ -190,11 +274,20 @@ void DriftServo::SeedRatio(double ppm) {
 DriftServo::Stats DriftServo::GetStats() const {
   MutexLock l(&lock_);
   Stats s;
-  s.measured_ppm = (smoothed_ratio_ - 1.0) * 1e6;
+  s.measured_ppm = hardware_controlling_ ? hardware_measured_ppm_
+                                         : (smoothed_ratio_ - 1.0) * 1e6;
   s.applied_ppm = (applied_ratio_ - 1.0) * 1e6;
   s.engaged = engaged_.load(std::memory_order_relaxed);
   s.windows = windows_;
   s.anomalies = anomalies_;
+  s.hardware_ready = hardware_ready_;
+  s.hardware_controlling = hardware_controlling_;
+  s.hardware_measured_ppm = hardware_measured_ppm_;
+  s.hardware_uncertainty_ppm = hardware_uncertainty_ppm_;
+  s.hardware_span_seconds = hardware_span_seconds_;
+  s.hardware_estimates = hardware_estimates_;
+  s.hardware_resets = hardware_estimator_.resets();
+  s.hardware_rejected = hardware_estimator_.rejected();
   return s;
 }
 

@@ -109,6 +109,7 @@ git apply "libwebrtc/patches/external_recording_demand.patch" -v --ignore-space-
 git apply "libwebrtc/patches/add_libwebrtc_build_target.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 git apply "libwebrtc/patches/fix_desktop_capture_compile.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 git apply "libwebrtc/patches/tsnx_alsa_capture_depth.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
+git apply "libwebrtc/patches/tsnx_alsa_hw_clock.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 cd ..
 
 mkdir -p "$ARTIFACTS_DIR/lib"

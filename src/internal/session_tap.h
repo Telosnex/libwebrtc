@@ -1,8 +1,8 @@
 // Copyright (c) Telosnex. Crash-safe, RT-safe diagnostic recorder.
 //
-// Records render / raw-capture / post-APM-capture PCM plus per-callback
-// pacing events for deterministic offline replay (test/aec_guarantees/
-// tsnx_replay.cc).
+// Records render / raw-capture / post-APM-capture PCM, per-callback pacing
+// events, and ALSA hardware-clock positions for deterministic offline replay
+// (test/aec_guarantees/ tsnx_replay.cc).
 //
 // RELIABILITY DESIGN (lessons from field sessions 1-3):
 //   R1 Audio threads NEVER touch disk or locks shared with disk I/O:
@@ -32,6 +32,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include "api/audio/audio_device_defines.h"
 
 namespace webrtc {
 
@@ -71,6 +73,11 @@ class SessionTap {
     FILE* log_ = nullptr;
   };
 
+  // RT-safe: records raw ALSA hardware-clock observations into one SPSC ring
+  // per native audio thread for later --hw-servo replay.
+  void PushHardwareClockObservation(
+      const AudioHardwareClockObservation& observation);
+
   // Creates <root>/<epoch_ms>/ and starts the writer thread. seed_ppm is
   // immutable recorder metadata and is installed before that thread starts.
   static std::unique_ptr<SessionTap> Create(const std::string& root,
@@ -83,6 +90,28 @@ class SessionTap {
   const std::string& dir() const { return dir_; }
 
  private:
+  class ClockStream {
+   public:
+    explicit ClockStream(const std::string& path);
+    void Push(const AudioHardwareClockObservation& observation);
+    void Drain();
+    void Close();
+    bool valid() const { return file_ != nullptr; }
+
+   private:
+    struct Event {
+      int64_t time_ns;
+      int64_t position_frames;
+      uint32_t sample_rate_hz;
+      uint32_t generation;
+    };
+    std::vector<Event> ring_;
+    std::atomic<size_t> write_{0};
+    std::atomic<size_t> read_{0};
+    std::atomic<int64_t> dropped_{0};
+    FILE* file_ = nullptr;
+  };
+
   SessionTap(std::string dir, double seed_ppm);
   void WriterLoop();
   bool FormatsReady() const;
@@ -91,6 +120,7 @@ class SessionTap {
   std::string dir_;
   const double seed_ppm_;
   std::unique_ptr<Stream> render_, cap_raw_, cap_apm_;
+  std::unique_ptr<ClockStream> hw_playout_, hw_capture_;
   std::thread writer_;
   std::atomic<bool> stop_{false};
   bool valid_ = false;

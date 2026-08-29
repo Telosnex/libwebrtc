@@ -20,6 +20,48 @@ int64_t EpochMs() {
 }
 }  // namespace
 
+SessionTap::ClockStream::ClockStream(const std::string& path) {
+  ring_.resize(4096);
+  file_ = fopen(path.c_str(), "w");
+}
+
+void SessionTap::ClockStream::Push(
+    const AudioHardwareClockObservation& observation) {
+  const size_t write = write_.load(std::memory_order_relaxed);
+  const size_t read = read_.load(std::memory_order_acquire);
+  if (ring_.size() - (write - read) < 1) {
+    dropped_.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  ring_[write & (ring_.size() - 1)] = {
+      observation.monotonic_time_ns, observation.position_frames,
+      observation.sample_rate_hz, observation.generation};
+  write_.store(write + 1, std::memory_order_release);
+}
+
+void SessionTap::ClockStream::Drain() {
+  if (!file_) return;
+  size_t read = read_.load(std::memory_order_relaxed);
+  const size_t write = write_.load(std::memory_order_acquire);
+  while (read < write) {
+    const Event& event = ring_[read & (ring_.size() - 1)];
+    fprintf(file_, "%lld %lld %u %u\n", static_cast<long long>(event.time_ns),
+            static_cast<long long>(event.position_frames), event.sample_rate_hz,
+            event.generation);
+    ++read;
+  }
+  if (read != read_.load(std::memory_order_relaxed)) fflush(file_);
+  read_.store(read, std::memory_order_release);
+}
+
+void SessionTap::ClockStream::Close() {
+  Drain();
+  if (file_) {
+    fclose(file_);
+    file_ = nullptr;
+  }
+}
+
 SessionTap::Stream::Stream(const std::string& prefix, size_t ring_samples)
     : prefix_(prefix) {
   // Power-of-two rings keep producer index math to a mask.
@@ -128,7 +170,10 @@ SessionTap::SessionTap(std::string dir, double seed_ppm)
   render_ = std::make_unique<Stream>(dir_ + "/render", kRing);
   cap_raw_ = std::make_unique<Stream>(dir_ + "/capture_raw", kRing);
   cap_apm_ = std::make_unique<Stream>(dir_ + "/capture_apm", kRing);
-  valid_ = render_->valid() && cap_raw_->valid() && cap_apm_->valid();
+  hw_playout_ = std::make_unique<ClockStream>(dir_ + "/playout_hw.log");
+  hw_capture_ = std::make_unique<ClockStream>(dir_ + "/capture_hw.log");
+  valid_ = render_->valid() && cap_raw_->valid() && cap_apm_->valid() &&
+           hw_playout_->valid() && hw_capture_->valid();
   if (!valid_) {
     RTC_LOG(LS_ERROR) << "SessionTap: failed opening one or more files in "
                       << dir_;
@@ -136,7 +181,7 @@ SessionTap::SessionTap(std::string dir, double seed_ppm)
   }
   writer_ = std::thread([this] { WriterLoop(); });
   RTC_LOG(LS_INFO) << "SessionTap: recording to " << dir_;
-  fprintf(stderr, "TSNX tap v2: %s\n", dir_.c_str());
+  fprintf(stderr, "TSNX tap v3: %s\n", dir_.c_str());
 }
 
 SessionTap::~SessionTap() {
@@ -145,7 +190,18 @@ SessionTap::~SessionTap() {
   render_->Close();
   cap_raw_->Close();
   cap_apm_->Close();
+  hw_playout_->Close();
+  hw_capture_->Close();
   if (!manifest_written_ && FormatsReady()) WriteManifest();
+}
+
+void SessionTap::PushHardwareClockObservation(
+    const AudioHardwareClockObservation& observation) {
+  if (observation.direction == AudioHardwareClockDirection::kPlayout) {
+    hw_playout_->Push(observation);
+  } else {
+    hw_capture_->Push(observation);
+  }
 }
 
 bool SessionTap::FormatsReady() const {
@@ -159,6 +215,8 @@ void SessionTap::WriterLoop() {
     render_->Drain();
     cap_raw_->Drain();
     cap_apm_->Drain();
+    hw_playout_->Drain();
+    hw_capture_->Drain();
     if (!manifest_written_ && FormatsReady()) WriteManifest();
   }
 }
@@ -171,7 +229,7 @@ void SessionTap::WriteManifest() {
   const int written = fprintf(
       f,
       "{\n"
-      "  \"version\": 2,\n"
+      "  \"version\": 3,\n"
       "  \"scope\": \"recorder_lifetime\",\n"
       "  \"format\": \"s16le\",\n"
       "  \"render\": {\"rate\": %u, \"channels\": %zu},\n"
@@ -179,6 +237,8 @@ void SessionTap::WriteManifest() {
       "  \"capture_apm\": {\"rate\": %u, \"channels\": %zu},\n"
       "  \"drift_seed_ppm\": %.1f,\n"
       "  \"pacing_log\": \"<stream>.log lines: t_us frames\",\n"
+      "  \"hardware_clock_log\": \"<direction>_hw.log lines: t_ns "
+      "position_frames rate generation\",\n"
       "  \"note\": \"timing gaps delimit calls; any complete .pcm sample "
       "prefix is valid\"\n"
       "}\n",

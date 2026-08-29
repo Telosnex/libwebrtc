@@ -1,0 +1,376 @@
+diff --git a/api/audio/audio_device_defines.h b/api/audio/audio_device_defines.h
+--- a/api/audio/audio_device_defines.h
++++ b/api/audio/audio_device_defines.h
+@@ -23,6 +23,18 @@
+ 
+ class AudioSender;
+ 
++// Monotonic sample-clock observation supplied by hardware-backed audio device
++// modules. `position_frames` is an unwrapped hardware-domain frame position;
++// `generation` changes whenever recovery invalidates that position's origin.
++enum class AudioHardwareClockDirection { kPlayout, kCapture };
++struct AudioHardwareClockObservation {
++  AudioHardwareClockDirection direction;
++  int64_t monotonic_time_ns;
++  int64_t position_frames;
++  uint32_t sample_rate_hz;
++  uint32_t generation;
++};
++
+ static const int kAdmMaxDeviceNameSize = 128;
+ static const int kAdmMaxFileNameSize = 512;
+ static const int kAdmMaxGuidSize = 128;
+@@ -94,6 +106,11 @@
+ 
+   virtual void SetStereoChannelSwapping(bool enable) {}
+ 
++  // Optional hardware-clock telemetry. Platform ADMs that cannot expose a
++  // stable hardware position simply never call this method.
++  virtual void OnAudioHardwareClockObservation(
++      const AudioHardwareClockObservation& observation) {}
++
+   virtual ~AudioTransport() {}
+ };
+ 
+diff --git a/modules/audio_device/audio_device_buffer.h b/modules/audio_device/audio_device_buffer.h
+--- a/modules/audio_device/audio_device_buffer.h
++++ b/modules/audio_device/audio_device_buffer.h
+@@ -117,6 +117,8 @@
+       std::optional<int64_t> capture_timestamp_ns);
+   virtual void SetVQEData(int play_delay_ms, int rec_delay_ms);
+   virtual int32_t DeliverRecordedData();
++  void DeliverHardwareClockObservation(
++      const AudioHardwareClockObservation& observation);
+   uint32_t NewMicLevel() const;
+ 
+   virtual int32_t RequestPlayoutData(size_t samples_per_channel);
+diff --git a/modules/audio_device/audio_device_buffer.cc b/modules/audio_device/audio_device_buffer.cc
+--- a/modules/audio_device/audio_device_buffer.cc
++++ b/modules/audio_device/audio_device_buffer.cc
+@@ -340,6 +340,12 @@
+     RTC_LOG(LS_ERROR) << "RecordedDataIsAvailable() failed";
+   }
+   return 0;
++}
++
++void AudioDeviceBuffer::DeliverHardwareClockObservation(
++    const AudioHardwareClockObservation& observation) {
++  if (audio_transport_cb_)
++    audio_transport_cb_->OnAudioHardwareClockObservation(observation);
+ }
+ 
+ int32_t AudioDeviceBuffer::RequestPlayoutData(size_t samples_per_channel) {
+diff --git a/modules/audio_device/linux/alsasymboltable_linux.h b/modules/audio_device/linux/alsasymboltable_linux.h
+--- a/modules/audio_device/linux/alsasymboltable_linux.h
++++ b/modules/audio_device/linux/alsasymboltable_linux.h
+@@ -54,6 +54,11 @@
+   X(snd_pcm_set_params)                        \
+   X(snd_pcm_get_params)                        \
+   X(snd_pcm_start)                             \
++  X(snd_pcm_status)                            \
++  X(snd_pcm_status_malloc)                     \
++  X(snd_pcm_status_free)                       \
++  X(snd_pcm_status_get_state)                  \
++  X(snd_pcm_status_get_delay)                  \
+   X(snd_pcm_stream)                            \
+   X(snd_pcm_frames_to_bytes)                   \
+   X(snd_pcm_bytes_to_frames)                   \
+diff --git a/modules/audio_device/linux/audio_device_alsa_linux.h b/modules/audio_device/linux/audio_device_alsa_linux.h
+--- a/modules/audio_device/linux/audio_device_alsa_linux.h
++++ b/modules/audio_device/linux/audio_device_alsa_linux.h
+@@ -145,6 +145,8 @@
+                          char* enumDeviceName = NULL,
+                          int32_t ednLen = 0) const;
+   int32_t ErrorRecovery(int32_t error, snd_pcm_t* deviceHandle);
++  void ResetHardwareClockObservation(bool playout);
++  void DeliverHardwareClockObservation(bool playout);
+ 
+   bool KeyPressed() const;
+ 
+@@ -205,6 +207,18 @@
+   snd_pcm_sframes_t _recordingDelay;
+   snd_pcm_sframes_t _playoutDelay;
+ 
++  // TSNX: public ALSA status exposes hw_ptr-equivalent positions through the
++  // atomic appl_ptr +/- delay relation. App counters and generations are reset
++  // after prepare/recovery so estimator windows never cross discontinuities.
++  snd_pcm_status_t* _recordingClockStatus;
++  snd_pcm_status_t* _playoutClockStatus;
++  int64_t _recordingAppFrames;
++  int64_t _playoutAppFrames;
++  int64_t _recordingLastClockObservationNs;
++  int64_t _playoutLastClockObservationNs;
++  uint32_t _recordingClockGeneration;
++  uint32_t _playoutClockGeneration;
++
+   char _oldKeyState[32];
+ #if defined(WEBRTC_USE_X11)
+   Display* _XDisplay;
+diff --git a/modules/audio_device/linux/audio_device_alsa_linux.cc b/modules/audio_device/linux/audio_device_alsa_linux.cc
+--- a/modules/audio_device/linux/audio_device_alsa_linux.cc
++++ b/modules/audio_device/linux/audio_device_alsa_linux.cc
+@@ -16,6 +16,7 @@
+ #include <cstdint>
+ #include <cstdlib>
+ #include <cstring>
++#include <ctime>
+ #include <vector>
+ 
+ #include "api/audio/audio_device.h"
+@@ -75,12 +76,9 @@
+ static const unsigned int ALSA_PLAYOUT_LATENCY = 40 * 1000;  // in us
+ static const unsigned int ALSA_CAPTURE_FREQ = 48000;
+ static const unsigned int ALSA_CAPTURE_CH = 2;
+-// TSNX: deep capture ring. Capture depth is overrun headroom, not
+-// latency (frames are read as soon as available). 40 ms meant any
+-// capture-thread stall > 40 ms dropped samples and reset AEC3
+-// convergence; measured stalls on the appliance reach 514 ms.
+-static const unsigned int ALSA_CAPTURE_LATENCY = 1000 * 1000;  // in us
+-static const unsigned int ALSA_CAPTURE_WAIT_TIMEOUT = 5;     // in ms
++// TSNX capture uses an explicit 10 ms period plus one-second hardware ring
++// below. Ring depth is overrun headroom, not delivery latency.
++static const unsigned int ALSA_CAPTURE_WAIT_TIMEOUT = 5;       // in ms
+ 
+ #define FUNC_GET_NUM_OF_DEVICE 0
+ #define FUNC_GET_DEVICE_NAME 1
+@@ -116,7 +114,15 @@
+       _recIsInitialized(false),
+       _playIsInitialized(false),
+       _recordingDelay(0),
+-      _playoutDelay(0) {
++      _playoutDelay(0),
++      _recordingClockStatus(nullptr),
++      _playoutClockStatus(nullptr),
++      _recordingAppFrames(0),
++      _playoutAppFrames(0),
++      _recordingLastClockObservationNs(0),
++      _playoutLastClockObservationNs(0),
++      _recordingClockGeneration(0),
++      _playoutClockGeneration(0) {
+   memset(_oldKeyState, 0, sizeof(_oldKeyState));
+   RTC_DLOG(LS_INFO) << __FUNCTION__ << " created";
+ }
+@@ -782,6 +788,10 @@
+   // Start by closing any existing wave-output devices
+   //
+   if (_handlePlayout != nullptr) {
++    if (_playoutClockStatus) {
++      LATE(snd_pcm_status_free)(_playoutClockStatus);
++      _playoutClockStatus = nullptr;
++    }
+     LATE(snd_pcm_close)(_handlePlayout);
+     _handlePlayout = nullptr;
+     _playIsInitialized = false;
+@@ -866,6 +876,13 @@
+   _playoutBufferSizeIn10MS =
+       LATE(snd_pcm_frames_to_bytes)(_handlePlayout, _playoutFramesIn10MS);
+ 
++  // Hardware clock telemetry is optional; audio remains usable if allocation
++  // fails and the seed/callback estimator remains the fallback.
++  if (LATE(snd_pcm_status_malloc)(&_playoutClockStatus) < 0) {
++    _playoutClockStatus = nullptr;
++    RTC_LOG(LS_WARNING) << "TSNX: cannot allocate playout ALSA status";
++  }
++
+   // Init varaibles used for play
+ 
+   if (_handlePlayout != nullptr) {
+@@ -904,6 +921,10 @@
+   // Start by closing any existing pcm-input devices
+   //
+   if (_handleRecord != nullptr) {
++    if (_recordingClockStatus) {
++      LATE(snd_pcm_status_free)(_recordingClockStatus);
++      _recordingClockStatus = nullptr;
++    }
+     errVal = LATE(snd_pcm_close)(_handleRecord);
+     _handleRecord = nullptr;
+     _recIsInitialized = false;
+@@ -954,7 +975,8 @@
+     const auto configure = [&](unsigned int channels) -> int {
+       snd_pcm_hw_params_t* hw = nullptr;
+       int err = LATE(snd_pcm_hw_params_malloc)(&hw);
+-      if (err < 0) return err;
++      if (err < 0)
++        return err;
+       const auto fail = [&](int e) {
+         LATE(snd_pcm_hw_params_free)(hw);
+         return e;
+@@ -977,8 +999,8 @@
+                                                       channels)) < 0)
+         return fail(err);
+       unsigned int rate = _recordingFreq;
+-      if ((err = LATE(snd_pcm_hw_params_set_rate_near)(_handleRecord, hw,
+-                                                       &rate, nullptr)) < 0)
++      if ((err = LATE(snd_pcm_hw_params_set_rate_near)(_handleRecord, hw, &rate,
++                                                       nullptr)) < 0)
+         return fail(err);
+       snd_pcm_uframes_t period = _recordingFramesIn10MS;
+       int dir = 0;
+@@ -986,8 +1008,8 @@
+                _handleRecord, hw, &period, &dir)) < 0)
+         return fail(err);
+       snd_pcm_uframes_t buffer = _recordingFreq;  // 1 second ring
+-      if ((err = LATE(snd_pcm_hw_params_set_buffer_size_near)(_handleRecord,
+-                                                              hw, &buffer)) < 0)
++      if ((err = LATE(snd_pcm_hw_params_set_buffer_size_near)(_handleRecord, hw,
++                                                              &buffer)) < 0)
+         return fail(err);
+       if ((err = LATE(snd_pcm_hw_params)(_handleRecord, hw)) < 0)
+         return fail(err);
+@@ -1037,6 +1059,11 @@
+   _recordingBufferSizeIn10MS =
+       LATE(snd_pcm_frames_to_bytes)(_handleRecord, _recordingFramesIn10MS);
+ 
++  if (LATE(snd_pcm_status_malloc)(&_recordingClockStatus) < 0) {
++    _recordingClockStatus = nullptr;
++    RTC_LOG(LS_WARNING) << "TSNX: cannot allocate capture ALSA status";
++  }
++
+   if (_handleRecord != nullptr) {
+     // Mark recording side as initialized
+     _recIsInitialized = true;
+@@ -1059,6 +1086,7 @@
+ 
+   int errVal = 0;
+   _recordingFramesLeft = _recordingFramesIn10MS;
++  ResetHardwareClockObservation(false);
+ 
+   // Make sure we only create the buffer once.
+   if (!_recordingBuffer)
+@@ -1134,6 +1162,10 @@
+     return -1;
+   }
+ 
++  if (_recordingClockStatus) {
++    LATE(snd_pcm_status_free)(_recordingClockStatus);
++    _recordingClockStatus = nullptr;
++  }
+   errVal = LATE(snd_pcm_close)(_handleRecord);
+   if (errVal < 0) {
+     RTC_LOG(LS_ERROR) << "Error closing record sound device, error: "
+@@ -1177,6 +1209,7 @@
+   _playing = true;
+ 
+   _playoutFramesLeft = 0;
++  ResetHardwareClockObservation(true);
+   if (!_playoutBuffer)
+     _playoutBuffer = new int8_t[_playoutBufferSizeIn10MS];
+   if (!_playoutBuffer) {
+@@ -1234,6 +1267,10 @@
+     RTC_LOG(LS_ERROR) << "Error stop playing: " << LATE(snd_strerror)(errVal);
+   }
+ 
++  if (_playoutClockStatus) {
++    LATE(snd_pcm_status_free)(_playoutClockStatus);
++    _playoutClockStatus = nullptr;
++  }
+   errVal = LATE(snd_pcm_close)(_handlePlayout);
+   if (errVal < 0)
+     RTC_LOG(LS_ERROR) << "Error closing playout sound device, error: "
+@@ -1485,14 +1522,87 @@
+       }
+     }
+ 
++    if (error == -EPIPE || error == -ESTRPIPE) {
++      ResetHardwareClockObservation(LATE(snd_pcm_stream)(deviceHandle) ==
++                                    SND_PCM_STREAM_PLAYBACK);
++    }
+     return -EPIPE == error ? 1 : 0;
+   } else {
+     RTC_LOG(LS_ERROR) << "Unrecoverable alsa stream error: " << res;
+   }
+ 
+   return res;
++}
++
++void AudioDeviceLinuxALSA::ResetHardwareClockObservation(bool playout) {
++  if (playout) {
++    _playoutAppFrames = 0;
++    _playoutLastClockObservationNs = 0;
++    ++_playoutClockGeneration;
++    if (_playoutClockGeneration == 0)
++      ++_playoutClockGeneration;
++  } else {
++    _recordingAppFrames = 0;
++    _recordingLastClockObservationNs = 0;
++    ++_recordingClockGeneration;
++    if (_recordingClockGeneration == 0)
++      ++_recordingClockGeneration;
++  }
+ }
+ 
++void AudioDeviceLinuxALSA::DeliverHardwareClockObservation(bool playout) {
++  if (!_ptrAudioBuffer)
++    return;
++  snd_pcm_t* handle = playout ? _handlePlayout : _handleRecord;
++  snd_pcm_status_t* status =
++      playout ? _playoutClockStatus : _recordingClockStatus;
++  if (!handle || !status)
++    return;
++
++  timespec before = {};
++  timespec after = {};
++  if (clock_gettime(CLOCK_MONOTONIC, &before) != 0)
++    return;
++  const int err = LATE(snd_pcm_status)(handle, status);
++  if (clock_gettime(CLOCK_MONOTONIC, &after) != 0 || err < 0)
++    return;
++  const snd_pcm_state_t state = LATE(snd_pcm_status_get_state)(status);
++  if (state != SND_PCM_STATE_RUNNING &&
++      !(playout && state == SND_PCM_STATE_DRAINING)) {
++    return;
++  }
++
++  const int64_t before_ns =
++      static_cast<int64_t>(before.tv_sec) * 1000000000LL + before.tv_nsec;
++  const int64_t after_ns =
++      static_cast<int64_t>(after.tv_sec) * 1000000000LL + after.tv_nsec;
++  const int64_t monotonic_ns = before_ns + (after_ns - before_ns) / 2;
++  int64_t& last_ns = playout ? _playoutLastClockObservationNs
++                             : _recordingLastClockObservationNs;
++  if (last_ns && monotonic_ns - last_ns < 5000000LL)
++    return;
++
++  // ALSA keeps appl_ptr opaque, but status delay is sampled atomically with
++  // hw_ptr. Our successful-I/O count has the same deltas as appl_ptr, hence
++  // these are unwrapped hw-domain positions up to an irrelevant constant:
++  //   playback hw_ptr = appl_ptr - delay
++  //   capture  hw_ptr = appl_ptr + delay
++  const int64_t delay = LATE(snd_pcm_status_get_delay)(status);
++  const int64_t app_frames = playout ? _playoutAppFrames : _recordingAppFrames;
++  const int64_t position_frames =
++      playout ? app_frames - delay : app_frames + delay;
++  if (position_frames < 0)
++    return;
++
++  last_ns = monotonic_ns;
++  AudioHardwareClockObservation observation = {
++      playout ? AudioHardwareClockDirection::kPlayout
++              : AudioHardwareClockDirection::kCapture,
++      monotonic_ns, position_frames, playout ? _playoutFreq : _recordingFreq,
++      playout ? _playoutClockGeneration : _recordingClockGeneration};
++  _ptrAudioBuffer->DeliverHardwareClockObservation(observation);
++}
++
+ // ============================================================================
+ //                                  Thread Methods
+ // ============================================================================
+@@ -1553,6 +1663,8 @@
+   } else {
+     RTC_DCHECK_EQ(frames, avail_frames);
+     _playoutFramesLeft -= frames;
++    _playoutAppFrames += frames;
++    DeliverHardwareClockObservation(true);
+   }
+ 
+   UnLock();
+@@ -1602,6 +1714,8 @@
+     return true;
+   } else if (frames > 0) {
+     RTC_DCHECK_EQ(frames, avail_frames);
++    _recordingAppFrames += frames;
++    DeliverHardwareClockObservation(false);
+ 
+     int left_size =
+         LATE(snd_pcm_frames_to_bytes)(_handleRecord, _recordingFramesLeft);
