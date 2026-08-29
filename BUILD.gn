@@ -52,6 +52,21 @@ if (is_linux) {
     ]
   }
 
+  rtc_executable("tsnx_alsa_hw_clock_probe") {
+    testonly = true
+    include_dirs = [ "." ]
+    sources = [
+      "src/internal/hardware_clock_estimator.cc",
+      "src/internal/hardware_clock_estimator.h",
+      "test/aec_guarantees/alsa_hw_clock_probe.cc",
+    ]
+    deps = [
+      "//api/audio:create_audio_device_module",
+      "//api/environment:environment_factory",
+      "//modules/audio_device",
+    ]
+  }
+
   rtc_test("tsnx_aec_guarantees_unittests") {
     testonly = true
     include_dirs = [ "." ]

@@ -7,8 +7,8 @@ hardening.
 
 `aec_guarantees.test.cc` uses generated fixtures to check:
 
-- ALSA hardware-position regression converges on 1 ms-quantized counters in
-  about 3.5 seconds;
+- ALSA hardware-position regression takes control from 1 ms-quantized counters
+  in about 5.5 seconds;
 - counter generations invalidate windows across XRUN/recovery;
 - observe mode cannot change audio correction;
 - control mode engages large drift without a seed and never engages in-spec
@@ -48,6 +48,23 @@ TSNX_HW_CLOCK_SERVO=observe   # estimate/log only; cannot alter correction
 TSNX_HW_CLOCK_SERVO=control   # estimator may own bounded correction
 TSNX_DRIFT_PPM=-1700          # optional startup fallback until hardware control
 ```
+
+## Silent hardware probe
+
+`tsnx_alsa_hw_clock_probe` opens a selected ALSA capture/playout pair, renders
+zeros, discards captured PCM, and prints the production estimator result. It is
+for development hardware validation and makes no correction:
+
+```bash
+tsnx_alsa_hw_clock_probe --list
+tsnx_alsa_hw_clock_probe --playout 2 --capture 1 --seconds 12
+```
+
+Reference Pi 5 validation (2026-08-29), using HDMI-1 `plughw` plus the USB mic
+`plughw`, produced `-1781.96 +/- 30.19 ppm` after 20 seconds with zero resets or
+rejections. A forced 2-second process stall caused an ALSA recovery generation;
+the estimator discarded the old window, reacquired near `-1700 ppm` by 5.5
+seconds, and finished with one reset and zero rejected observations.
 
 ## Deterministic field replay
 

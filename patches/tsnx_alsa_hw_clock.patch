@@ -2,9 +2,9 @@ diff --git a/api/audio/audio_device_defines.h b/api/audio/audio_device_defines.h
 --- a/api/audio/audio_device_defines.h
 +++ b/api/audio/audio_device_defines.h
 @@ -23,6 +23,18 @@
- 
+
  class AudioSender;
- 
+
 +// Monotonic sample-clock observation supplied by hardware-backed audio device
 +// modules. `position_frames` is an unwrapped hardware-domain frame position;
 +// `generation` changes whenever recovery invalidates that position's origin.
@@ -21,9 +21,9 @@ diff --git a/api/audio/audio_device_defines.h b/api/audio/audio_device_defines.h
  static const int kAdmMaxFileNameSize = 512;
  static const int kAdmMaxGuidSize = 128;
 @@ -94,6 +106,11 @@
- 
+
    virtual void SetStereoChannelSwapping(bool enable) {}
- 
+
 +  // Optional hardware-clock telemetry. Platform ADMs that cannot expose a
 +  // stable hardware position simply never call this method.
 +  virtual void OnAudioHardwareClockObservation(
@@ -31,7 +31,7 @@ diff --git a/api/audio/audio_device_defines.h b/api/audio/audio_device_defines.h
 +
    virtual ~AudioTransport() {}
  };
- 
+
 diff --git a/modules/audio_device/audio_device_buffer.h b/modules/audio_device/audio_device_buffer.h
 --- a/modules/audio_device/audio_device_buffer.h
 +++ b/modules/audio_device/audio_device_buffer.h
@@ -42,7 +42,7 @@ diff --git a/modules/audio_device/audio_device_buffer.h b/modules/audio_device/a
 +  void DeliverHardwareClockObservation(
 +      const AudioHardwareClockObservation& observation);
    uint32_t NewMicLevel() const;
- 
+
    virtual int32_t RequestPlayoutData(size_t samples_per_channel);
 diff --git a/modules/audio_device/audio_device_buffer.cc b/modules/audio_device/audio_device_buffer.cc
 --- a/modules/audio_device/audio_device_buffer.cc
@@ -58,7 +58,7 @@ diff --git a/modules/audio_device/audio_device_buffer.cc b/modules/audio_device/
 +  if (audio_transport_cb_)
 +    audio_transport_cb_->OnAudioHardwareClockObservation(observation);
  }
- 
+
  int32_t AudioDeviceBuffer::RequestPlayoutData(size_t samples_per_channel) {
 diff --git a/modules/audio_device/linux/alsasymboltable_linux.h b/modules/audio_device/linux/alsasymboltable_linux.h
 --- a/modules/audio_device/linux/alsasymboltable_linux.h
@@ -84,13 +84,13 @@ diff --git a/modules/audio_device/linux/audio_device_alsa_linux.h b/modules/audi
    int32_t ErrorRecovery(int32_t error, snd_pcm_t* deviceHandle);
 +  void ResetHardwareClockObservation(bool playout);
 +  void DeliverHardwareClockObservation(bool playout);
- 
+
    bool KeyPressed() const;
- 
+
 @@ -205,6 +207,18 @@
    snd_pcm_sframes_t _recordingDelay;
    snd_pcm_sframes_t _playoutDelay;
- 
+
 +  // TSNX: public ALSA status exposes hw_ptr-equivalent positions through the
 +  // atomic appl_ptr +/- delay relation. App counters and generations are reset
 +  // after prepare/recovery so estimator windows never cross discontinuities.
@@ -115,7 +115,7 @@ diff --git a/modules/audio_device/linux/audio_device_alsa_linux.cc b/modules/aud
  #include <cstring>
 +#include <ctime>
  #include <vector>
- 
+
  #include "api/audio/audio_device.h"
 @@ -75,12 +76,9 @@
  static const unsigned int ALSA_PLAYOUT_LATENCY = 40 * 1000;  // in us
@@ -129,8 +129,8 @@ diff --git a/modules/audio_device/linux/audio_device_alsa_linux.cc b/modules/aud
 -static const unsigned int ALSA_CAPTURE_WAIT_TIMEOUT = 5;     // in ms
 +// TSNX capture uses an explicit 10 ms period plus one-second hardware ring
 +// below. Ring depth is overrun headroom, not delivery latency.
-+static const unsigned int ALSA_CAPTURE_WAIT_TIMEOUT = 5;       // in ms
- 
++static const unsigned int ALSA_CAPTURE_WAIT_TIMEOUT = 5;  // in ms
+
  #define FUNC_GET_NUM_OF_DEVICE 0
  #define FUNC_GET_DEVICE_NAME 1
 @@ -116,7 +114,15 @@
@@ -161,20 +161,20 @@ diff --git a/modules/audio_device/linux/audio_device_alsa_linux.cc b/modules/aud
      LATE(snd_pcm_close)(_handlePlayout);
      _handlePlayout = nullptr;
      _playIsInitialized = false;
-@@ -866,6 +876,13 @@
+@@ -865,6 +875,13 @@
+   // Set play buffer size
    _playoutBufferSizeIn10MS =
        LATE(snd_pcm_frames_to_bytes)(_handlePlayout, _playoutFramesIn10MS);
- 
++
 +  // Hardware clock telemetry is optional; audio remains usable if allocation
 +  // fails and the seed/callback estimator remains the fallback.
 +  if (LATE(snd_pcm_status_malloc)(&_playoutClockStatus) < 0) {
 +    _playoutClockStatus = nullptr;
 +    RTC_LOG(LS_WARNING) << "TSNX: cannot allocate playout ALSA status";
 +  }
-+
+
    // Init varaibles used for play
- 
-   if (_handlePlayout != nullptr) {
+
 @@ -904,6 +921,10 @@
    // Start by closing any existing pcm-input devices
    //
@@ -221,7 +221,7 @@ diff --git a/modules/audio_device/linux/audio_device_alsa_linux.cc b/modules/aud
 @@ -1037,6 +1059,11 @@
    _recordingBufferSizeIn10MS =
        LATE(snd_pcm_frames_to_bytes)(_handleRecord, _recordingFramesIn10MS);
- 
+
 +  if (LATE(snd_pcm_status_malloc)(&_recordingClockStatus) < 0) {
 +    _recordingClockStatus = nullptr;
 +    RTC_LOG(LS_WARNING) << "TSNX: cannot allocate capture ALSA status";
@@ -231,17 +231,30 @@ diff --git a/modules/audio_device/linux/audio_device_alsa_linux.cc b/modules/aud
      // Mark recording side as initialized
      _recIsInitialized = true;
 @@ -1059,6 +1086,7 @@
- 
+
    int errVal = 0;
    _recordingFramesLeft = _recordingFramesIn10MS;
 +  ResetHardwareClockObservation(false);
- 
+
    // Make sure we only create the buffer once.
    if (!_recordingBuffer)
-@@ -1134,6 +1162,10 @@
+@@ -1119,7 +1147,12 @@
+   _recIsInitialized = false;
+   _recording = false;
+
++  // The audio thread can already be waiting for mutex_. Joining it while
++  // holding that mutex deadlocks shutdown. State is false and handles remain
++  // valid while the final iteration drains.
++  mutex_.Unlock();
+   _ptrThreadRec.Finalize();
++  mutex_.Lock();
+
+   _recordingFramesLeft = 0;
+   if (_recordingBuffer) {
+@@ -1134,6 +1167,10 @@
      return -1;
    }
- 
+
 +  if (_recordingClockStatus) {
 +    LATE(snd_pcm_status_free)(_recordingClockStatus);
 +    _recordingClockStatus = nullptr;
@@ -249,18 +262,32 @@ diff --git a/modules/audio_device/linux/audio_device_alsa_linux.cc b/modules/aud
    errVal = LATE(snd_pcm_close)(_handleRecord);
    if (errVal < 0) {
      RTC_LOG(LS_ERROR) << "Error closing record sound device, error: "
-@@ -1177,6 +1209,7 @@
+@@ -1177,6 +1214,7 @@
    _playing = true;
- 
+
    _playoutFramesLeft = 0;
 +  ResetHardwareClockObservation(true);
    if (!_playoutBuffer)
      _playoutBuffer = new int8_t[_playoutBufferSizeIn10MS];
    if (!_playoutBuffer) {
-@@ -1234,6 +1267,10 @@
+@@ -1221,8 +1259,12 @@
+
+   _playing = false;
+
+-  // stop playout thread first
++  // The audio thread can already be waiting for mutex_. Joining it while
++  // holding that mutex deadlocks shutdown. State is false and handles remain
++  // valid while the final iteration drains.
++  mutex_.Unlock();
+   _ptrThreadPlay.Finalize();
++  mutex_.Lock();
+
+   _playoutFramesLeft = 0;
+   delete[] _playoutBuffer;
+@@ -1234,6 +1276,10 @@
      RTC_LOG(LS_ERROR) << "Error stop playing: " << LATE(snd_strerror)(errVal);
    }
- 
+
 +  if (_playoutClockStatus) {
 +    LATE(snd_pcm_status_free)(_playoutClockStatus);
 +    _playoutClockStatus = nullptr;
@@ -268,10 +295,10 @@ diff --git a/modules/audio_device/linux/audio_device_alsa_linux.cc b/modules/aud
    errVal = LATE(snd_pcm_close)(_handlePlayout);
    if (errVal < 0)
      RTC_LOG(LS_ERROR) << "Error closing playout sound device, error: "
-@@ -1485,14 +1522,87 @@
+@@ -1485,6 +1531,10 @@
        }
      }
- 
+
 +    if (error == -EPIPE || error == -ESTRPIPE) {
 +      ResetHardwareClockObservation(LATE(snd_pcm_stream)(deviceHandle) ==
 +                                    SND_PCM_STREAM_PLAYBACK);
@@ -279,11 +306,10 @@ diff --git a/modules/audio_device/linux/audio_device_alsa_linux.cc b/modules/aud
      return -EPIPE == error ? 1 : 0;
    } else {
      RTC_LOG(LS_ERROR) << "Unrecoverable alsa stream error: " << res;
-   }
- 
+@@ -1493,6 +1543,75 @@
    return res;
-+}
-+
+ }
+
 +void AudioDeviceLinuxALSA::ResetHardwareClockObservation(bool playout) {
 +  if (playout) {
 +    _playoutAppFrames = 0;
@@ -298,8 +324,8 @@ diff --git a/modules/audio_device/linux/audio_device_alsa_linux.cc b/modules/aud
 +    if (_recordingClockGeneration == 0)
 +      ++_recordingClockGeneration;
 +  }
- }
- 
++}
++
 +void AudioDeviceLinuxALSA::DeliverHardwareClockObservation(bool playout) {
 +  if (!_ptrAudioBuffer)
 +    return;
@@ -356,21 +382,21 @@ diff --git a/modules/audio_device/linux/audio_device_alsa_linux.cc b/modules/aud
  // ============================================================================
  //                                  Thread Methods
  // ============================================================================
-@@ -1553,6 +1663,8 @@
+@@ -1553,6 +1672,8 @@
    } else {
      RTC_DCHECK_EQ(frames, avail_frames);
      _playoutFramesLeft -= frames;
 +    _playoutAppFrames += frames;
 +    DeliverHardwareClockObservation(true);
    }
- 
+
    UnLock();
-@@ -1602,6 +1714,8 @@
+@@ -1602,6 +1723,8 @@
      return true;
    } else if (frames > 0) {
      RTC_DCHECK_EQ(frames, avail_frames);
 +    _recordingAppFrames += frames;
 +    DeliverHardwareClockObservation(false);
- 
+
      int left_size =
          LATE(snd_pcm_frames_to_bytes)(_handleRecord, _recordingFramesLeft);

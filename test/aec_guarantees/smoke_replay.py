@@ -14,7 +14,7 @@ import wave
 
 RATE = 48_000
 BLOCK = RATE // 100
-FRAMES = 500
+FRAMES = 700
 
 
 def pcm_frame(frame: int) -> list[int]:

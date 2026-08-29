@@ -89,10 +89,10 @@ std::string ReadTextFile(const std::string& path) {
 }
 
 TEST(HardwareClockEstimatorGuaranteeTest,
-     QuantizedPositionsConvergeWithinFourSeconds) {
+     QuantizedPositionsConvergeWithinSixSeconds) {
   HardwareClockEstimator estimator;
   std::optional<HardwareClockEstimator::Estimate> latest;
-  for (int i = 0; i < 450; ++i) {
+  for (int i = 0; i < 650; ++i) {
     estimator.Add(
         HardwareObservation(AudioHardwareClockDirection::kPlayout, i, 1.0));
     auto update = estimator.Add(HardwareObservation(
@@ -109,7 +109,7 @@ TEST(HardwareClockEstimatorGuaranteeTest,
      CounterGenerationResetInvalidatesTheWindow) {
   HardwareClockEstimator estimator;
   std::optional<HardwareClockEstimator::Estimate> latest;
-  for (int i = 0; i < 450; ++i) {
+  for (int i = 0; i < 650; ++i) {
     estimator.Add(
         HardwareObservation(AudioHardwareClockDirection::kPlayout, i, 1.0));
     auto update = estimator.Add(HardwareObservation(
@@ -119,17 +119,17 @@ TEST(HardwareClockEstimatorGuaranteeTest,
   ASSERT_TRUE(latest.has_value());
 
   bool estimated_after_reset = false;
-  for (int i = 450; i < 650; ++i) {
+  for (int i = 650; i < 850; ++i) {
     auto playout =
         HardwareObservation(AudioHardwareClockDirection::kPlayout, i, 1.0, 2);
     auto capture = HardwareObservation(AudioHardwareClockDirection::kCapture, i,
                                        1.0 - 1700.0e-6, 2);
     // A new ALSA generation also establishes a new position origin.
     playout.position_frames -=
-        HardwareObservation(AudioHardwareClockDirection::kPlayout, 450, 1.0, 2)
+        HardwareObservation(AudioHardwareClockDirection::kPlayout, 650, 1.0, 2)
             .position_frames;
     capture.position_frames -=
-        HardwareObservation(AudioHardwareClockDirection::kCapture, 450,
+        HardwareObservation(AudioHardwareClockDirection::kCapture, 650,
                             1.0 - 1700.0e-6, 2)
             .position_frames;
     if (estimator.Add(playout).estimate || estimator.Add(capture).estimate)
@@ -142,7 +142,7 @@ TEST(HardwareClockEstimatorGuaranteeTest,
 TEST(DriftServoGuaranteeTest, HardwareObserveModeNeverChangesCorrection) {
   DriftServo servo;
   servo.SetHardwareClockMode(DriftServo::HardwareClockMode::kObserve);
-  FeedHardwareClocks(&servo, 0, 450, 1.0 - 1700.0e-6);
+  FeedHardwareClocks(&servo, 0, 700, 1.0 - 1700.0e-6);
   const auto stats = servo.GetStats();
   EXPECT_TRUE(stats.hardware_ready);
   EXPECT_FALSE(stats.hardware_controlling);
@@ -153,7 +153,7 @@ TEST(DriftServoGuaranteeTest, HardwareObserveModeNeverChangesCorrection) {
 TEST(DriftServoGuaranteeTest, HardwareControlEngagesWithoutSeedInSeconds) {
   DriftServo servo;
   servo.SetHardwareClockMode(DriftServo::HardwareClockMode::kControl);
-  FeedHardwareClocks(&servo, 0, 450, 1.0 - 1700.0e-6);
+  FeedHardwareClocks(&servo, 0, 700, 1.0 - 1700.0e-6);
   const auto stats = servo.GetStats();
   EXPECT_TRUE(stats.hardware_ready);
   EXPECT_TRUE(stats.hardware_controlling);
@@ -166,7 +166,7 @@ TEST(DriftServoGuaranteeTest, HardwareControlSupersedesStartupSeed) {
   DriftServo servo;
   servo.SetHardwareClockMode(DriftServo::HardwareClockMode::kControl);
   servo.SeedRatio(-1500.0);
-  FeedHardwareClocks(&servo, 0, 500, 1.0 - 1700.0e-6);
+  FeedHardwareClocks(&servo, 0, 700, 1.0 - 1700.0e-6);
   const auto stats = servo.GetStats();
   EXPECT_TRUE(stats.hardware_controlling);
   EXPECT_NEAR(stats.applied_ppm, -1700.0, 100.0);
@@ -175,7 +175,7 @@ TEST(DriftServoGuaranteeTest, HardwareControlSupersedesStartupSeed) {
 TEST(DriftServoGuaranteeTest, InSpecHardwareClockNeverEngages) {
   DriftServo servo;
   servo.SetHardwareClockMode(DriftServo::HardwareClockMode::kControl);
-  FeedHardwareClocks(&servo, 0, 500, 1.0 + 25.0e-6);
+  FeedHardwareClocks(&servo, 0, 700, 1.0 + 25.0e-6);
   const auto stats = servo.GetStats();
   EXPECT_TRUE(stats.hardware_ready);
   EXPECT_FALSE(stats.hardware_controlling);

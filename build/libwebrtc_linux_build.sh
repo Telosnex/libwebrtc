@@ -158,7 +158,8 @@ ninja -C "$OUTPUT_DIR" \
   libwebrtc_cpp_api_unittests \
   external_recording_demand_unittests \
   tsnx_aec_guarantees_unittests \
-  tsnx_replay
+  tsnx_replay \
+  tsnx_alsa_hw_clock_probe
 
 if [ "$arch" = "x64" ]; then
   (

@@ -37,7 +37,7 @@ class HardwareClockEstimator {
   int64_t resets() const { return resets_; }
   int64_t rejected() const { return rejected_; }
 
-  static constexpr double kMinSpanSeconds = 3.0;
+  static constexpr double kMinSpanSeconds = 5.0;
   static constexpr double kMaxSpanSeconds = 8.0;
   static constexpr int64_t kUpdateIntervalNs = 250000000LL;
   static constexpr double kMaxFitResidualSeconds = 0.003;
