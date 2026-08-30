@@ -120,7 +120,7 @@ ninja.exe -C %OUTPUT_DIR% libwebrtc libwebrtc_cpp_api_unittests external_recordi
 if errorlevel 1 exit /b 1
 
 if "!arch!" == "x64" (
-  %OUTPUT_DIR%\libwebrtc_cpp_api_unittests.exe --gtest_filter=AudioProcessing.*:AudioDevice.RecordingStateReadbackHasNoCaptureSideEffect
+  %OUTPUT_DIR%\libwebrtc_cpp_api_unittests.exe --gtest_filter=AudioProcessing.*:AudioDevice.RecordingStateReadbackHasNoCaptureSideEffect:AudioDevice.ActivePlayoutRouteReadbackIsGraceful
   if errorlevel 1 exit /b 1
 
   %OUTPUT_DIR%\external_recording_demand_unittests.exe --gtest_filter=ExternalRecordingDemandTest.LastSenderRemovalKeepsRecording

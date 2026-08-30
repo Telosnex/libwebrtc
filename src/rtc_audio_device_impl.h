@@ -1,6 +1,8 @@
 #ifndef LIB_WEBRTC_AUDIO_DEVICE_IMPL_HXX
 #define LIB_WEBRTC_AUDIO_DEVICE_IMPL_HXX
 
+#include <string>
+
 #include "modules/audio_device/audio_device_impl.h"
 #include "modules/audio_device/include/audio_device.h"
 #include "rtc_audio_device.h"
@@ -8,7 +10,8 @@
 #include "rtc_base/thread.h"
 
 namespace libwebrtc {
-class AudioDeviceImpl : public RTCAudioDevice, public webrtc::AudioDeviceObserver {
+class AudioDeviceImpl : public RTCAudioDevice,
+                        public webrtc::AudioDeviceObserver {
  public:
   AudioDeviceImpl(
       webrtc::scoped_refptr<webrtc::AudioDeviceModule> audio_device_module,
@@ -45,6 +48,9 @@ class AudioDeviceImpl : public RTCAudioDevice, public webrtc::AudioDeviceObserve
 
   RecordingState GetRecordingState() override;
 
+  int32_t ActivePlayoutDeviceName(char name[kAdmMaxDeviceNameSize],
+                                  char guid[kAdmMaxGuidSize]) override;
+
   int32_t OnDeviceChange(OnDeviceChangeCallback listener) override;
 
  protected:
@@ -54,6 +60,7 @@ class AudioDeviceImpl : public RTCAudioDevice, public webrtc::AudioDeviceObserve
   webrtc::scoped_refptr<webrtc::AudioDeviceModule> audio_device_module_;
   webrtc::Thread* worker_thread_ = nullptr;
   OnDeviceChangeCallback listener_ = nullptr;
+  std::string selected_playout_device_id_;
 };
 
 }  // namespace libwebrtc

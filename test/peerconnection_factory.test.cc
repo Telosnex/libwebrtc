@@ -1,11 +1,10 @@
-#include "test/gtest.h"
-
 #include "libwebrtc.h"
 #include "rtc_audio_device.h"
 #include "rtc_audio_processing.h"
 #include "rtc_mediaconstraints.h"
 #include "rtc_peerconnection.h"
 #include "rtc_peerconnection_factory.h"
+#include "test/gtest.h"
 
 using libwebrtc::LibWebRTC;
 using libwebrtc::scoped_refptr;
@@ -82,6 +81,32 @@ TEST(AudioDevice, EnumerationWorksBeforePeerConnection) {
 
   factory->Delete(pc);
   pc = nullptr;
+  audio_device = nullptr;
+  factory->Terminate();
+  factory = nullptr;
+  LibWebRTC::Terminate();
+}
+
+TEST(AudioDevice, ActivePlayoutRouteReadbackIsGraceful) {
+  ASSERT_TRUE(LibWebRTC::Initialize());
+  scoped_refptr<libwebrtc::RTCPeerConnectionFactory> factory =
+      LibWebRTC::CreateRTCPeerConnectionFactory();
+  ASSERT_TRUE(factory.get() != nullptr);
+  ASSERT_TRUE(factory->Initialize());
+  scoped_refptr<libwebrtc::RTCAudioDevice> audio_device =
+      factory->GetAudioDevice();
+  ASSERT_TRUE(audio_device.get() != nullptr);
+
+  char name[libwebrtc::RTCAudioDevice::kAdmMaxDeviceNameSize] = {0};
+  char guid[libwebrtc::RTCAudioDevice::kAdmMaxGuidSize] = {0};
+  const int32_t result = audio_device->ActivePlayoutDeviceName(name, guid);
+  if (result == 0) {
+    EXPECT_TRUE(name[0] != '\0' || guid[0] != '\0');
+  } else {
+    EXPECT_EQ(name[0], '\0');
+    EXPECT_EQ(guid[0], '\0');
+  }
+
   audio_device = nullptr;
   factory->Terminate();
   factory = nullptr;

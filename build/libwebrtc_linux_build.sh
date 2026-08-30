@@ -166,7 +166,7 @@ if [ "$arch" = "x64" ]; then
   (
     cd "$OUTPUT_DIR"
     LD_LIBRARY_PATH=. ./libwebrtc_cpp_api_unittests \
-      --gtest_filter='AudioProcessing.*:AudioDevice.RecordingStateReadbackHasNoCaptureSideEffect'
+      --gtest_filter='AudioProcessing.*:AudioDevice.RecordingStateReadbackHasNoCaptureSideEffect:AudioDevice.ActivePlayoutRouteReadbackIsGraceful'
     ./external_recording_demand_unittests \
       --gtest_filter='ExternalRecordingDemandTest.LastSenderRemovalKeepsRecording'
     ./tsnx_aec_guarantees_unittests

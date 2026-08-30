@@ -1,5 +1,8 @@
 #include "rtc_audio_device_impl.h"
 
+#include <cstring>
+#include <string>
+
 #include "rtc_base/logging.h"
 
 namespace libwebrtc {
@@ -42,33 +45,62 @@ int32_t AudioDeviceImpl::RecordingDeviceName(uint16_t index,
 }
 
 int32_t AudioDeviceImpl::SetPlayoutDevice(uint16_t index) {
-  worker_thread_->PostTask([this, index] {
+  return worker_thread_->BlockingCall([this, index] {
     RTC_DCHECK_RUN_ON(worker_thread_);
-    if (audio_device_module_->Playing()) {
-      audio_device_module_->StopPlayout();
-      audio_device_module_->SetPlayoutDevice(index);
-      audio_device_module_->InitPlayout();
-      audio_device_module_->StartPlayout();
-    } else {
-      audio_device_module_->SetPlayoutDevice(index);
+
+    char name[kAdmMaxDeviceNameSize] = {0};
+    char guid[kAdmMaxGuidSize] = {0};
+    const int32_t name_result =
+        audio_device_module_->PlayoutDeviceName(index, name, guid);
+    const bool was_playing = audio_device_module_->Playing();
+    if (was_playing) {
+      const int32_t stop_result = audio_device_module_->StopPlayout();
+      if (stop_result != 0) return stop_result;
     }
+
+    const int32_t set_result = audio_device_module_->SetPlayoutDevice(index);
+    if (set_result == 0) {
+#if defined(WEBRTC_LINUX)
+      // Pulse/ALSA reserve index zero for the moving system-default route.
+      selected_playout_device_id_ = index == 0 || name_result != 0
+                                        ? std::string()
+                                        : std::string(guid[0] ? guid : name);
+#else
+      selected_playout_device_id_ =
+          name_result == 0 ? std::string(guid[0] ? guid : name) : std::string();
+#endif
+    }
+
+    int32_t restart_result = 0;
+    if (was_playing) {
+      restart_result = audio_device_module_->InitPlayout();
+      if (restart_result == 0) {
+        restart_result = audio_device_module_->StartPlayout();
+      }
+    }
+    return set_result != 0 ? set_result : restart_result;
   });
-  return 0;
 }
 
 int32_t AudioDeviceImpl::SetRecordingDevice(uint16_t index) {
-  worker_thread_->PostTask([this, index] {
+  return worker_thread_->BlockingCall([this, index] {
     RTC_DCHECK_RUN_ON(worker_thread_);
-    if (audio_device_module_->Recording()) {
-      audio_device_module_->StopRecording();
-      audio_device_module_->SetRecordingDevice(index);
-      audio_device_module_->InitRecording();
-      audio_device_module_->StartRecording();
-    } else {
-      audio_device_module_->SetRecordingDevice(index);
+    const bool was_recording = audio_device_module_->Recording();
+    if (was_recording) {
+      const int32_t stop_result = audio_device_module_->StopRecording();
+      if (stop_result != 0) return stop_result;
     }
+
+    const int32_t set_result = audio_device_module_->SetRecordingDevice(index);
+    int32_t restart_result = 0;
+    if (was_recording) {
+      restart_result = audio_device_module_->InitRecording();
+      if (restart_result == 0) {
+        restart_result = audio_device_module_->StartRecording();
+      }
+    }
+    return set_result != 0 ? set_result : restart_result;
   });
-  return 0;
 }
 
 int32_t AudioDeviceImpl::SetMicrophoneVolume(uint32_t volume) {
@@ -138,6 +170,51 @@ RTCAudioDevice::RecordingState AudioDeviceImpl::GetRecordingState() {
     state.recording = audio_device_module_->Recording();
     state.external_demand = audio_device_module_->ExternalRecordingDemand();
     return state;
+  });
+}
+
+int32_t AudioDeviceImpl::ActivePlayoutDeviceName(
+    char name[kAdmMaxDeviceNameSize], char guid[kAdmMaxGuidSize]) {
+  return worker_thread_->BlockingCall([&] {
+    RTC_DCHECK_RUN_ON(worker_thread_);
+    if (name == nullptr) return -1;
+    std::memset(name, 0, kAdmMaxDeviceNameSize);
+    if (guid != nullptr) std::memset(guid, 0, kAdmMaxGuidSize);
+
+    const int16_t device_count = audio_device_module_->PlayoutDevices();
+    if (device_count <= 0) return -1;
+
+    if (!selected_playout_device_id_.empty()) {
+      char candidate_name[kAdmMaxDeviceNameSize] = {0};
+      char candidate_guid[kAdmMaxGuidSize] = {0};
+      for (uint16_t index = 0; index < device_count; ++index) {
+        if (audio_device_module_->PlayoutDeviceName(index, candidate_name,
+                                                    candidate_guid) != 0) {
+          continue;
+        }
+        const char* candidate_id =
+            candidate_guid[0] ? candidate_guid : candidate_name;
+        if (selected_playout_device_id_ == candidate_id) {
+          std::strncpy(name, candidate_name, kAdmMaxDeviceNameSize - 1);
+          if (guid != nullptr) {
+            std::strncpy(guid, candidate_guid, kAdmMaxGuidSize - 1);
+          }
+          return 0;
+        }
+      }
+      // The explicitly selected endpoint disappeared. The ADM falls back to
+      // its platform default; do not silently jump back if it is reattached.
+      selected_playout_device_id_.clear();
+    }
+
+#if defined(WEBRTC_WIN)
+    constexpr uint16_t kDefaultPlayoutDevice =
+        static_cast<uint16_t>(-1);  // Default communications endpoint.
+#else
+    constexpr uint16_t kDefaultPlayoutDevice = 0;
+#endif
+    return audio_device_module_->PlayoutDeviceName(kDefaultPlayoutDevice, name,
+                                                   guid);
   });
 }
 

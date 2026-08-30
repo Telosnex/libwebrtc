@@ -111,6 +111,16 @@ class RTCAudioDevice : public RefCountInterface {
   /** Returns one worker-thread-consistent recording state snapshot. */
   virtual RecordingState GetRecordingState() = 0;
 
+  /**
+   * Resolves the concrete output endpoint currently used for playout.
+   *
+   * When playout follows the system default, this resolves that default to its
+   * current device name and stable identifier instead of returning a generic
+   * "default" token.
+   */
+  virtual int32_t ActivePlayoutDeviceName(char name[kAdmMaxDeviceNameSize],
+                                          char guid[kAdmMaxGuidSize]) = 0;
+
  protected:
   virtual ~RTCAudioDevice() {}
 };
