@@ -105,6 +105,7 @@ if (rtc_include_tests) {
       "src/internal/capture_clock_policy.h",
       "test/capture_clock_policy_test.cc",
     ]
+    deps = []
   }
   rtc_test("libwebrtc_cpp_api_unittests") {
     testonly = true
