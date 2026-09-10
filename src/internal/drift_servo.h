@@ -75,8 +75,11 @@ class DriftServo {
   // Returns number of complete 10 ms output blocks now available.
   // Caller then drains with PopBlock(). If the servo is bypassed/disengaged,
   // returns 0 and the caller must use the original buffer unchanged (G1).
+  // allow_correction=false accounts for drift but bypasses resampling/FIFOs;
+  // used by explicit observe mode to guarantee unmodified audio.
   size_t PushCaptureAndCorrect(const int16_t* samples, size_t frames,
-                               uint32_t sample_rate_hz, size_t channels);
+                               uint32_t sample_rate_hz, size_t channels,
+                               bool allow_correction = true);
   bool PopBlock(int16_t* out, size_t frames_per_block);
 
   bool engaged() const { return engaged_.load(std::memory_order_relaxed); }

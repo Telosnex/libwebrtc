@@ -86,7 +86,9 @@ class CustomProcessingAdapter : public webrtc::CustomProcessing {
   int num_channels_ = 0;
 };
 
-RTCAudioProcessingImpl::RTCAudioProcessingImpl() {
+RTCAudioProcessingImpl::RTCAudioProcessingImpl(bool clock_correction_supported)
+    : clock_correction_(std::make_shared<AudioClockCorrection>(
+          clock_correction_supported)) {
   capture_post_processor_ = new CustomProcessingAdapter();
   std::unique_ptr<webrtc::CustomProcessing> capture_post_processor(
       capture_post_processor_);
@@ -149,6 +151,20 @@ RTCAudioProcessingImpl::GetCaptureProcessingState() {
       config.gain_controller1.enabled || config.gain_controller2.enabled);
   state.high_pass_filter = component(config.high_pass_filter.enabled);
   return state;
+}
+
+int ConfigureAudioClockCorrectionV1(RTCAudioProcessing* processing,
+                                   AudioClockCorrectionMode mode) {
+  if (!processing) return -1;
+  return static_cast<RTCAudioProcessingImpl*>(processing)
+      ->clock_correction()->Configure(mode);
+}
+
+AudioClockCorrectionState GetAudioClockCorrectionStateV1(
+    RTCAudioProcessing* processing) {
+  if (!processing) return {};
+  return static_cast<RTCAudioProcessingImpl*>(processing)
+      ->clock_correction()->GetState();
 }
 
 }  // namespace libwebrtc

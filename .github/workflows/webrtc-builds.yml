@@ -108,6 +108,17 @@ jobs:
           name: libwebrtc-linux-${{ matrix.arch }}-${{ matrix.profile }}
           path: libwebrtc-linux-${{ matrix.arch }}-${{ matrix.profile }}.zip*
 
+      - name: Package same-build native test tools
+        run: |
+          tar -C build -czf libwebrtc-linux-${{ matrix.arch }}-${{ matrix.profile }}-tests.tar.gz linux-${{ matrix.arch }}-${{ matrix.profile }}-tests
+          sha256sum libwebrtc-linux-${{ matrix.arch }}-${{ matrix.profile }}-tests.tar.gz > libwebrtc-linux-${{ matrix.arch }}-${{ matrix.profile }}-tests.tar.gz.shasum
+
+      - name: Upload native test tools
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: libwebrtc-linux-${{ matrix.arch }}-${{ matrix.profile }}-tests
+          path: libwebrtc-linux-${{ matrix.arch }}-${{ matrix.profile }}-tests.tar.gz*
+
   build-win:
     if: github.event_name != 'workflow_dispatch' || github.event.inputs.build_windows == 'true'
     strategy:

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "src/internal/drift_servo.h"
+#include "src/internal/audio_clock_correction.h"
 #include "src/internal/hardware_clock_estimator.h"
 #include "src/internal/self_echo_gate.h"
 #include "src/internal/session_tap.h"
@@ -229,6 +230,47 @@ TEST(DriftServoGuaranteeTest,
   DriftServo too_large;
   too_large.SeedRatio(DriftServo::kMaxCorrectionPpm + 1.0);
   EXPECT_FALSE(too_large.GetStats().engaged);
+}
+
+TEST(CaptureClockProfileTest, ControlPreservesRealServoAcrossSamePolicyStarts) {
+  libwebrtc::AudioClockCorrection correction(true);
+  using Mode = libwebrtc::AudioClockCorrectionMode;
+  ASSERT_EQ(correction.Configure(Mode::kOff), 0);  // ignore test host env
+  ASSERT_EQ(correction.Configure(Mode::kControl), 0);
+  auto snapshot = correction.Read(true);
+  ASSERT_NE(snapshot.servo, nullptr);
+  FeedHardwareClocks(snapshot.servo.get(), 0, 700, 1.0 - 1700.0e-6);
+  ASSERT_TRUE(correction.GetState().hardware_controlling);
+  const auto before = snapshot.servo->GetStats();
+  EXPECT_EQ(correction.Configure(Mode::kControl), 0);
+  EXPECT_EQ(correction.Read(true).servo, snapshot.servo);
+  EXPECT_EQ(snapshot.servo->GetStats().hardware_estimates, before.hardware_estimates);
+  EXPECT_EQ(correction.Configure(Mode::kOff), -2);
+  EXPECT_EQ(correction.Configure(Mode::kObserve), -2);
+}
+
+TEST(CaptureClockProfileTest, ObserveBypassesEvenEngagedCallbackFallback) {
+  libwebrtc::AudioClockCorrection correction(true);
+  using Mode = libwebrtc::AudioClockCorrectionMode;
+  ASSERT_EQ(correction.Configure(Mode::kOff), 0);
+  ASSERT_EQ(correction.Configure(Mode::kObserve), 0);
+  auto snapshot = correction.Read(true);
+  ASSERT_TRUE(snapshot.observe_only);
+  auto input = SignalFrame(0);
+  const auto original = input;
+  // A callback estimate may engage its internal model, but explicit observe
+  // must never feed corrected samples to APM or build an unconsumed FIFO.
+  snapshot.servo->SeedRatio(-1700);
+  for (int i = 0; i < 1000; ++i) {
+    EXPECT_EQ(snapshot.servo->PushCaptureAndCorrect(
+        input.data(), kBlock, kRate, 1, !snapshot.observe_only), 0u);
+    snapshot.servo->OnRenderFrames(kBlock, kRate);
+  }
+  EXPECT_EQ(input, original);
+  EXPECT_FALSE(correction.GetState().engaged);
+  EXPECT_DOUBLE_EQ(correction.GetState().applied_ppm, 0);
+  std::vector<int16_t> output(kBlock);
+  EXPECT_FALSE(snapshot.servo->PopBlock(output.data(), kBlock));
 }
 
 TEST(SelfEchoGateGuaranteeTest, PureEchoClosesAndRenderSilenceReopens) {

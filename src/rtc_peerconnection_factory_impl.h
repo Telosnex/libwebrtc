@@ -93,6 +93,7 @@ class RTCPeerConnectionFactoryImpl : public RTCPeerConnectionFactory {
   void CreateAudioDeviceModule_w();
 
   void DestroyAudioDeviceModule_w();
+  bool AudioClockCorrectionSupported_w() const;
 
   webrtc::scoped_refptr<libwebrtc::LocalAudioSource>
   CreateAudioSourceWithOptions(webrtc::AudioOptions* options,

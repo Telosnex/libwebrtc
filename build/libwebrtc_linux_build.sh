@@ -158,6 +158,7 @@ ninja -C "$OUTPUT_DIR" \
   libwebrtc \
   libwebrtc_cpp_api_unittests \
   external_recording_demand_unittests \
+  capture_clock_policy_test \
   tsnx_aec_guarantees_unittests \
   tsnx_replay \
   tsnx_alsa_hw_clock_probe
@@ -169,6 +170,7 @@ if [ "$arch" = "x64" ]; then
       --gtest_filter='AudioProcessing.*:AudioDevice.RecordingStateReadbackHasNoCaptureSideEffect:AudioDevice.ActivePlayoutRouteReadbackIsGraceful'
     ./external_recording_demand_unittests \
       --gtest_filter='ExternalRecordingDemandTest.LastSenderRemovalKeepsRecording'
+    ./capture_clock_policy_test
     ./tsnx_aec_guarantees_unittests
     python3 "$COMMAND_DIR/../test/aec_guarantees/smoke_replay.py" \
       ./tsnx_replay
@@ -176,6 +178,24 @@ if [ "$arch" = "x64" ]; then
 else
   echo "ARM64 tests compiled; execution requires an ARM64 host."
 fi
+
+# Retain the same-build test executables for ARM64 device-side qualification.
+# Keep them separate from the runtime/header ZIP consumed by flutter_webrtc.
+TESTS_DIR="$COMMAND_DIR/linux-$arch-$profile-tests"
+mkdir -p "$TESTS_DIR"
+for name in libwebrtc.so libwebrtc_cpp_api_unittests \
+    external_recording_demand_unittests capture_clock_policy_test \
+    tsnx_aec_guarantees_unittests tsnx_replay tsnx_alsa_hw_clock_probe; do
+  cp "$OUTPUT_DIR/$name" "$TESTS_DIR/"
+done
+cp "$COMMAND_DIR/../test/aec_guarantees/smoke_replay.py" "$TESTS_DIR/"
+(
+  cd "$TESTS_DIR"
+  sha256sum libwebrtc.so libwebrtc_cpp_api_unittests \
+    external_recording_demand_unittests capture_clock_policy_test \
+    tsnx_aec_guarantees_unittests tsnx_replay tsnx_alsa_hw_clock_probe \
+    smoke_replay.py > SHA256SUMS
+)
 
 cp "$OUTPUT_DIR/libwebrtc.so" "$ARTIFACTS_DIR/lib"
 cp -rf "src/libwebrtc/LICENSE" "$ARTIFACTS_DIR/"

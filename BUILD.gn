@@ -69,7 +69,10 @@ if (rtc_include_tests && is_linux) {
 
   rtc_test("tsnx_aec_guarantees_unittests") {
     testonly = true
-    include_dirs = [ "." ]
+    include_dirs = [
+      ".",
+      "include",
+    ]
     sources = [
       "src/internal/drift_servo.cc",
       "src/internal/drift_servo.h",
@@ -80,6 +83,9 @@ if (rtc_include_tests && is_linux) {
       "src/internal/session_tap.cc",
       "src/internal/session_tap.h",
       "test/aec_guarantees/aec_guarantees.test.cc",
+      "src/internal/audio_clock_correction.cc",
+      "src/internal/audio_clock_correction.h",
+      "src/internal/capture_clock_policy.h",
     ]
     deps = [
       "//common_audio",
@@ -92,6 +98,14 @@ if (rtc_include_tests && is_linux) {
 }
 
 if (rtc_include_tests) {
+  rtc_executable("capture_clock_policy_test") {
+    testonly = true
+    include_dirs = [ "." ]
+    sources = [
+      "src/internal/capture_clock_policy.h",
+      "test/capture_clock_policy_test.cc",
+    ]
+  }
   rtc_test("libwebrtc_cpp_api_unittests") {
     testonly = true
     sources = [ "test/peerconnection_factory.test.cc" ]
@@ -164,6 +178,7 @@ rtc_shared_library("libwebrtc") {
     "include/libwebrtc.h",
     "include/rtc_audio_device.h",
     "include/rtc_audio_processing.h",
+    "include/rtc_audio_clock_correction.h",
     "include/rtc_audio_source.h",
     "include/rtc_audio_track.h",
     "include/rtc_data_channel.h",
@@ -201,6 +216,9 @@ rtc_shared_library("libwebrtc") {
     "src/internal/hardware_clock_estimator.h",
     "src/internal/self_echo_gate.cc",
     "src/internal/self_echo_gate.h",
+    "src/internal/audio_clock_correction.cc",
+    "src/internal/audio_clock_correction.h",
+    "src/internal/capture_clock_policy.h",
     "src/internal/custom_audio_transport_impl.cc",
     "src/internal/custom_audio_transport_impl.h",
     "src/internal/local_audio_track.cc",

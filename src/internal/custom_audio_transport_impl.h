@@ -14,7 +14,7 @@
 #include "rtc_base/ref_count.h"
 #include "rtc_base/task_utils/repeating_task.h"
 #include "rtc_base/thread_annotations.h"
-#include "src/internal/drift_servo.h"
+#include "src/internal/audio_clock_correction.h"
 #include "src/internal/self_echo_gate.h"
 #include "src/internal/session_tap.h"
 
@@ -24,7 +24,8 @@ class CustomAudioTransportImpl : public AudioTransport, public AudioSender {
  public:
   CustomAudioTransportImpl(
       AudioMixer* mixer, AudioProcessing* audio_processing,
-      AsyncAudioProcessing::Factory* async_audio_processing_factory);
+      AsyncAudioProcessing::Factory* async_audio_processing_factory,
+      std::shared_ptr<libwebrtc::AudioClockCorrection> clock_correction);
   ~CustomAudioTransportImpl() {}
 
   int32_t RecordedDataIsAvailable(const void* audioSamples, size_t nSamples,
@@ -68,16 +69,18 @@ class CustomAudioTransportImpl : public AudioTransport, public AudioSender {
   void SendAudioData(std::unique_ptr<AudioFrame> audio_frame) override;
 
   // Diagnostics for wrapper/stats plumbing. Safe when features disabled.
-  bool drift_servo_enabled() const { return drift_servo_ != nullptr; }
+  bool drift_servo_enabled() const {
+    return clock_correction_->Read().servo != nullptr;
+  }
   bool self_echo_gate_enabled() const { return self_echo_gate_ != nullptr; }
   DriftServo::Stats GetDriftServoStats() const;
   SelfEchoGate::Stats GetSelfEchoGateStats() const;
 
  private:
   std::unique_ptr<webrtc::AudioTransportImpl> audio_transport_impl_;
-  // Telosnex AEC hardening (flag-gated, default off; see drift_servo.h and
-  // self_echo_gate.h for guarantees). Null when disabled.
-  std::unique_ptr<DriftServo> drift_servo_;
+  // Shared factory-lifetime clock policy. Its servo is null when disabled;
+  // self-echo diagnostics remain separately environment-gated.
+  const std::shared_ptr<libwebrtc::AudioClockCorrection> clock_correction_;
   std::unique_ptr<SelfEchoGate> self_echo_gate_;
   std::vector<int16_t> servo_block_;
   std::atomic<int64_t> render_calls_{0};
@@ -92,7 +95,9 @@ class CustomAudioTransportImpl : public AudioTransport, public AudioSender {
 
 class CustomAudioTransportFactory : public AudioTransportFactory {
  public:
-  CustomAudioTransportFactory() = default;
+  explicit CustomAudioTransportFactory(
+      std::shared_ptr<libwebrtc::AudioClockCorrection> clock_correction)
+      : clock_correction_(std::move(clock_correction)) {}
   ~CustomAudioTransportFactory() = default;
   std::unique_ptr<AudioTransport> Create(
       webrtc::AudioMixer* mixer, webrtc::AudioProcessing* audio_processing,
@@ -100,7 +105,8 @@ class CustomAudioTransportFactory : public AudioTransportFactory {
       override {
     std::unique_ptr<CustomAudioTransportImpl> transport =
         std::make_unique<CustomAudioTransportImpl>(
-            mixer, audio_processing, async_audio_processing_factory);
+            mixer, audio_processing, async_audio_processing_factory,
+            clock_correction_);
 
     audio_transport_impl_ = transport.get();
     return transport;
@@ -111,6 +117,7 @@ class CustomAudioTransportFactory : public AudioTransportFactory {
   }
 
  private:
+  const std::shared_ptr<libwebrtc::AudioClockCorrection> clock_correction_;
   CustomAudioTransportImpl* audio_transport_impl_ = nullptr;
 };
 

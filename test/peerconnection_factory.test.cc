@@ -1,6 +1,7 @@
 #include "libwebrtc.h"
 #include "rtc_audio_device.h"
 #include "rtc_audio_processing.h"
+#include "rtc_audio_clock_correction.h"
 #include "rtc_mediaconstraints.h"
 #include "rtc_peerconnection.h"
 #include "rtc_peerconnection_factory.h"
@@ -181,6 +182,31 @@ TEST(AudioProcessing, CaptureProcessorCanBeReplacedAndUnregistered) {
   processing->SetCapturePostProcessing(nullptr);
   EXPECT_EQ(second.release_calls, 1);
 
+  processing = nullptr;
+  factory->Terminate();
+  factory = nullptr;
+  LibWebRTC::Terminate();
+}
+
+// Exercise the new additive API against a real, already-created factory. This
+// does not start recording and is safe on headless native build hosts.
+TEST(AudioProcessing, ClockCorrectionAfterFactoryCreation) {
+  ASSERT_TRUE(LibWebRTC::Initialize());
+  auto factory = LibWebRTC::CreateRTCPeerConnectionFactory();
+  ASSERT_TRUE(factory->Initialize());
+  auto processing = factory->GetAudioProcessing();
+  using Mode = libwebrtc::AudioClockCorrectionMode;
+  EXPECT_EQ(libwebrtc::ConfigureAudioClockCorrectionV1(processing.get(), Mode::kOff), 0);
+  const auto before = libwebrtc::GetAudioClockCorrectionStateV1(processing.get());
+  EXPECT_EQ(before.mode, 0);
+  EXPECT_FALSE(before.capture_started);
+  if (before.supported) {
+    EXPECT_EQ(libwebrtc::ConfigureAudioClockCorrectionV1(processing.get(), Mode::kControl), 0);
+    EXPECT_EQ(libwebrtc::GetAudioClockCorrectionStateV1(processing.get()).mode, 2);
+  } else {
+    EXPECT_EQ(libwebrtc::ConfigureAudioClockCorrectionV1(processing.get(), Mode::kControl), -1);
+    EXPECT_EQ(libwebrtc::GetAudioClockCorrectionStateV1(processing.get()).mode, 0);
+  }
   processing = nullptr;
   factory->Terminate();
   factory = nullptr;

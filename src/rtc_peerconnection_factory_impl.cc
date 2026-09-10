@@ -72,14 +72,16 @@ bool RTCPeerConnectionFactoryImpl::Initialize() {
 
   if (!audio_processing_impl_) {
     worker_thread_->BlockingCall([this] {
-      audio_processing_impl_ = new RefCountedObject<RTCAudioProcessingImpl>();
+      audio_processing_impl_ = new RefCountedObject<RTCAudioProcessingImpl>(
+          AudioClockCorrectionSupported_w());
     });
   }
 
   if (!audio_transport_factory_) {
     worker_thread_->BlockingCall([this] {
       audio_transport_factory_ =
-          webrtc::make_ref_counted<CustomAudioTransportFactory>();
+          webrtc::make_ref_counted<CustomAudioTransportFactory>(
+              audio_processing_impl_->clock_correction());
     });
   }
 
@@ -113,6 +115,9 @@ bool RTCPeerConnectionFactoryImpl::Terminate() {
     audio_processing_impl_ = nullptr;
   });
   rtc_peerconnection_factory_ = NULL;
+  // A reinitialized factory must bind its newly-created processing wrapper to
+  // a new clock controller, not reuse the terminated factory's transport.
+  worker_thread_->BlockingCall([this] { audio_transport_factory_ = nullptr; });
   if (audio_device_module_) {
     worker_thread_->BlockingCall([this] { DestroyAudioDeviceModule_w(); });
   }
@@ -133,6 +138,17 @@ void RTCPeerConnectionFactoryImpl::CreateAudioDeviceModule_w() {
 #endif
   audio_device_module_ =
       webrtc::CreateAudioDeviceModule(env_, audio_layer, false);
+}
+
+bool RTCPeerConnectionFactoryImpl::AudioClockCorrectionSupported_w() const {
+#if defined(WEBRTC_LINUX)
+  auto layer = webrtc::AudioDeviceModule::kPlatformDefaultAudio;
+  return audio_device_module_ &&
+         audio_device_module_->ActiveAudioLayer(&layer) == 0 &&
+         layer == webrtc::AudioDeviceModule::kLinuxAlsaAudio;
+#else
+  return false;
+#endif
 }
 
 void RTCPeerConnectionFactoryImpl::DestroyAudioDeviceModule_w() {
@@ -178,7 +194,8 @@ scoped_refptr<RTCAudioProcessing>
 RTCPeerConnectionFactoryImpl::GetAudioProcessing() {
   if (!audio_processing_impl_) {
     worker_thread_->BlockingCall([this] {
-      audio_processing_impl_ = new RefCountedObject<RTCAudioProcessingImpl>();
+      audio_processing_impl_ = new RefCountedObject<RTCAudioProcessingImpl>(
+          AudioClockCorrectionSupported_w());
     });
   }
 

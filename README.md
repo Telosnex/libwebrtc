@@ -1,5 +1,20 @@
 # libwebrtc-{windows,linux}-{amd64,x86,armv7,arm64}.{dll,so}
 
+> **Telosnex fork maintainers:** start with the app's
+> [WebRTC maintenance runbook](../telosnex/lib/features/mic/docs/WEBRTC_MAINTENANCE.md)
+> for the wrapper/core → native artifacts → plugin → app pin sequence, validation,
+> deployment and rollback. This link uses the shared sibling-checkout layout;
+> otherwise open `lib/features/mic/docs/WEBRTC_MAINTENANCE.md` in the Telosnex app
+> repository. It also records unpublished clock-profile work; do not assume an
+> edited header or a green Dart test means a matching binary has been published.
+>
+> The generic upstream manual build instructions below are background, **not**
+> the complete Telosnex patch/build recipe. Use `build/.gclient`, platform scripts
+> and `.github/workflows/webrtc-builds.yml`; do not ship from the one-patch
+> example below. Algorithm/replay checks live in
+> [test/aec_guarantees/README.md](test/aec_guarantees/README.md), and capture
+> ownership in [patches/EXTERNAL_RECORDING_DEMAND.md](patches/EXTERNAL_RECORDING_DEMAND.md).
+
 WebRTC C++ wrapper
 
 A C++ binary wrapper for webrtc, mainly used for flutter-webrtc desktop (windows, linux, embedded) version release.

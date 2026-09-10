@@ -15,43 +15,16 @@ bool EnvFlag(const char* name) {
   return v && v[0] == '1';
 }
 
-DriftServo::HardwareClockMode HardwareClockModeFromEnvironment() {
-  const char* value = std::getenv("TSNX_HW_CLOCK_SERVO");
-  if (!value || !value[0]) return DriftServo::HardwareClockMode::kDisabled;
-  if (strcmp(value, "observe") == 0)
-    return DriftServo::HardwareClockMode::kObserve;
-  if (strcmp(value, "1") == 0 || strcmp(value, "control") == 0)
-    return DriftServo::HardwareClockMode::kControl;
-  fprintf(stderr,
-          "TSNX: invalid TSNX_HW_CLOCK_SERVO=%s (use observe or control)\n",
-          value);
-  return DriftServo::HardwareClockMode::kDisabled;
-}
 }  // namespace
 
 CustomAudioTransportImpl::CustomAudioTransportImpl(
     AudioMixer* mixer, AudioProcessing* audio_processing,
-    AsyncAudioProcessing::Factory* async_audio_processing_factory)
+    AsyncAudioProcessing::Factory* async_audio_processing_factory,
+    std::shared_ptr<libwebrtc::AudioClockCorrection> clock_correction)
     : audio_transport_impl_(std::make_unique<webrtc::AudioTransportImpl>(
-          mixer, audio_processing, async_audio_processing_factory)) {
-  const auto hardware_clock_mode = HardwareClockModeFromEnvironment();
-  if (EnvFlag("TSNX_DRIFT_SERVO") ||
-      hardware_clock_mode != DriftServo::HardwareClockMode::kDisabled) {
-    drift_servo_ = std::make_unique<DriftServo>();
-    drift_servo_->SetHardwareClockMode(hardware_clock_mode);
-    RTC_LOG(LS_INFO) << "TSNX: drift servo enabled";
-    if (hardware_clock_mode != DriftServo::HardwareClockMode::kDisabled) {
-      fprintf(stderr, "TSNX: hardware clock servo %s\n",
-              hardware_clock_mode == DriftServo::HardwareClockMode::kControl
-                  ? "control"
-                  : "observe");
-    }
-    if (const char* s = std::getenv("TSNX_DRIFT_PPM"); s && s[0]) {
-      seed_ppm_env_ = atof(s);
-      drift_servo_->SeedRatio(seed_ppm_env_);
-      fprintf(stderr, "TSNX: drift servo seeded %s ppm\n", s);
-    }
-  }
+          mixer, audio_processing, async_audio_processing_factory)),
+      clock_correction_(std::move(clock_correction)) {
+  seed_ppm_env_ = clock_correction_->seed_ppm();
   if (EnvFlag("TSNX_SELF_ECHO_GATE")) {
     self_echo_gate_ = std::make_unique<SelfEchoGate>();
     RTC_LOG(LS_INFO) << "TSNX: self-echo gate enabled (observing)";
@@ -62,7 +35,8 @@ CustomAudioTransportImpl::CustomAudioTransportImpl(
 }
 
 DriftServo::Stats CustomAudioTransportImpl::GetDriftServoStats() const {
-  return drift_servo_ ? drift_servo_->GetStats() : DriftServo::Stats();
+  const auto servo = clock_correction_->Read().servo;
+  return servo ? servo->GetStats() : DriftServo::Stats();
 }
 
 SelfEchoGate::Stats CustomAudioTransportImpl::GetSelfEchoGateStats() const {
@@ -71,7 +45,8 @@ SelfEchoGate::Stats CustomAudioTransportImpl::GetSelfEchoGateStats() const {
 
 void CustomAudioTransportImpl::OnAudioHardwareClockObservation(
     const AudioHardwareClockObservation& observation) {
-  if (drift_servo_) drift_servo_->OnHardwareClockObservation(observation);
+  const auto servo = clock_correction_->Read().servo;
+  if (servo) servo->OnHardwareClockObservation(observation);
   if (tap_) tap_->PushHardwareClockObservation(observation);
 }
 
@@ -81,12 +56,14 @@ int32_t CustomAudioTransportImpl::RecordedDataIsAvailable(
     size_t nChannels, uint32_t samplesPerSec, uint32_t totalDelayMS,
     int32_t clockDrift, uint32_t currentMicLevel, bool keyPressed,
     uint32_t& newMicLevel) {
+  const auto correction = clock_correction_->Read(true);
+  const auto& drift_servo_ = correction.servo;
   cap_legacy_calls_.fetch_add(1, std::memory_order_relaxed);
   if (drift_servo_) {
     const size_t blocks = drift_servo_->PushCaptureAndCorrect(
         static_cast<const int16_t*>(audioSamples), nSamples, samplesPerSec,
-        nChannels);
-    if (drift_servo_->engaged() && nChannels <= 2) {
+        nChannels, !correction.observe_only);
+    if (!correction.observe_only && drift_servo_->engaged() && nChannels <= 2) {
       const size_t block_frames = samplesPerSec / 100;
       servo_block_.resize(block_frames * nChannels);
       int32_t rv = 0;
@@ -110,6 +87,8 @@ int32_t CustomAudioTransportImpl::RecordedDataIsAvailable(
     size_t nChannels, uint32_t samplesPerSec, uint32_t totalDelayMS,
     int32_t clockDrift, uint32_t currentMicLevel, bool keyPressed,
     uint32_t& newMicLevel, std::optional<int64_t> estimated_capture_time_ns) {
+  const auto correction = clock_correction_->Read(true);
+  const auto& drift_servo_ = correction.servo;
   cap_modern_calls_.fetch_add(1, std::memory_order_relaxed);
   if (tap_) {
     tap_->cap_raw().Push(static_cast<const int16_t*>(audioSamples), nSamples,
@@ -118,8 +97,8 @@ int32_t CustomAudioTransportImpl::RecordedDataIsAvailable(
   if (drift_servo_) {
     const size_t blocks = drift_servo_->PushCaptureAndCorrect(
         static_cast<const int16_t*>(audioSamples), nSamples, samplesPerSec,
-        nChannels);
-    if (drift_servo_->engaged() && nChannels <= 2) {
+        nChannels, !correction.observe_only);
+    if (!correction.observe_only && drift_servo_->engaged() && nChannels <= 2) {
       const size_t block_frames = samplesPerSec / 100;
       servo_block_.resize(block_frames * nChannels);
       int32_t rv = 0;
@@ -143,6 +122,8 @@ int32_t CustomAudioTransportImpl::NeedMorePlayData(
     size_t nSamples, size_t nBytesPerSample, size_t nChannels,
     uint32_t samplesPerSec, void* audioSamples, size_t& nSamplesOut,
     int64_t* elapsed_time_ms, int64_t* ntp_time_ms) {
+  const auto correction = clock_correction_->Read();
+  const auto& drift_servo_ = correction.servo;
   const int32_t rv = audio_transport_impl_->NeedMorePlayData(
       nSamples, nBytesPerSample, nChannels, samplesPerSec, audioSamples,
       nSamplesOut, elapsed_time_ms, ntp_time_ms);
@@ -164,7 +145,12 @@ int32_t CustomAudioTransportImpl::NeedMorePlayData(
     const int64_t calls = render_calls_.fetch_add(1) + 1;
     if (calls % 3000 == 0) {
       if (drift_servo_) {
-        const auto s = drift_servo_->GetStats();
+        auto s = drift_servo_->GetStats();
+        if (correction.observe_only) {
+          s.applied_ppm = 0;
+          s.engaged = false;
+          s.hardware_controlling = false;
+        }
         // stderr as well: journald captures it even without an RTC log sink.
         fprintf(stderr,
                 "TSNX drift: measured %.0f ppm applied %.0f engaged %d"

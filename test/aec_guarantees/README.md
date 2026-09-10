@@ -113,3 +113,30 @@ fresh RT-safe tap, useful under ASAN.
 `TSNX_TAP_DIR` records raw microphone PCM. It must be unset in normal
 production. Arm it only for an explicitly approved diagnostic recording and
 disarm it immediately afterward.
+
+## Capture-profile configuration
+
+The C++ wrapper now exposes the additive, versioned
+`ConfigureAudioClockCorrectionV1` / `GetAudioClockCorrectionStateV1` API through
+`rtc_audio_clock_correction.h`. It targets the shared factory-lifetime clock
+controller, not APM configuration or factory recreation. The old profile
+struct and vtable layout are unchanged. Build/install the new header and native
+library together.
+
+- Explicit `control`: existing hardware servo plus callback fallback.
+- Explicit `observe`: measure but pass capture bytes through unchanged, even
+  when the callback estimator internally engages.
+- Explicit `off`: no servo. Omitted configuration retains existing environment
+  semantics; no generic wrapper default is changed.
+- Supported hardware producer: the ADM's **actual ALSA backend**, including
+  platform-default selection when it resolves to ALSA.
+- First capture callback locks the mode for the factory lifetime. Same-mode
+  reapplication retains estimates/FIFOs across RTP/peerless lifecycle changes;
+  conflicting requests return `-2`. Unsupported/invalid requests return `-1`.
+
+`capture_clock_policy_test` covers ownership, racing capture/configuration,
+unsupported mode values and idempotence without audio hardware. It is compiled
+and run by the Linux recipe. The AEC guarantee suite also covers real-servo
+control persistence and observe passthrough; the C++ API suite covers configuring
+an already-created factory. These full native gates require the patched WebRTC
+build checkout, not just this wrapper source checkout.

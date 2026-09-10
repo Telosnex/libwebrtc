@@ -186,7 +186,8 @@ void DriftServo::ApplyHardwareEstimate(
 
 size_t DriftServo::PushCaptureAndCorrect(const int16_t* samples, size_t frames,
                                          uint32_t sample_rate_hz,
-                                         size_t channels) {
+                                         size_t channels,
+                                         bool allow_correction) {
   if (sample_rate_hz == 0 || channels == 0) return 0;
   double applied;
   {
@@ -194,7 +195,8 @@ size_t DriftServo::PushCaptureAndCorrect(const int16_t* samples, size_t frames,
     capture_seconds_ += static_cast<double>(frames) / sample_rate_hz;
     applied = applied_ratio_;
   }
-  if (!engaged_.load(std::memory_order_relaxed) || channels > kMaxChannels) {
+  if (!allow_correction || !engaged_.load(std::memory_order_relaxed) ||
+      channels > kMaxChannels) {
     capture_saw_engaged_ = false;
     return 0;
   }
