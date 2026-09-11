@@ -75,7 +75,7 @@ index 37af03d8ca..26ca2e0943 100644
  
  // Extends the default ADM interface with some extra test methods.
 diff --git a/audio/audio_state.cc b/audio/audio_state.cc
-index aab979facd..4acd0b3d4d 100644
+index aab979facd..da09d6d478 100644
 --- a/audio/audio_state.cc
 +++ b/audio/audio_state.cc
 @@ -120,6 +120,7 @@ void AudioState::SetRecording(bool enabled) {
@@ -86,15 +86,24 @@ index aab979facd..4acd0b3d4d 100644
        if (!adm->Recording()) {
          if (adm->InitRecording() == 0) {
            adm->StartRecording();
-@@ -128,6 +129,7 @@ void AudioState::SetRecording(bool enabled) {
+@@ -127,8 +128,14 @@ void AudioState::SetRecording(bool enabled) {
+       }
      }
    } else {
-     // Disable recording.
+-    // Disable recording.
+-    adm->StopRecording();
++    // Disable WebRTC-owned recording without interrupting app-owned capture.
 +    adm->SetWebRtcRecordingDemand(false);
-     adm->StopRecording();
++    if (!adm->ExternalRecordingDemand()) {
++      adm->StopRecording();
++    } else {
++      RTC_LOG(LS_INFO)
++          << "Keeping ADM recording active for external recording demand";
++    }
    }
    recording_enabled_ = enabled;
-@@ -144,6 +146,9 @@ void AudioState::AddSendingStream(webrtc::AudioSendStream* stream,
+ }
+@@ -144,6 +151,9 @@ void AudioState::AddSendingStream(webrtc::AudioSendStream* stream,
  
    // Make sure recording is initialized; start recording if enabled.
    auto* adm = config_.audio_device_module.get();
@@ -104,7 +113,7 @@ index aab979facd..4acd0b3d4d 100644
    if (!adm->Recording()) {
      if (adm->InitRecording() == 0) {
        if (recording_enabled_) {
-@@ -169,7 +174,14 @@ void AudioState::RemoveSendingStream(webrtc::AudioSendStream* stream) {
+@@ -169,7 +179,14 @@ void AudioState::RemoveSendingStream(webrtc::AudioSendStream* stream) {
    RTC_DCHECK_EQ(1, count);
    UpdateAudioTransportWithSendingStreams();
    if (sending_streams_.empty()) {
@@ -120,13 +129,30 @@ index aab979facd..4acd0b3d4d 100644
  }
  
 diff --git a/audio/audio_state_unittest.cc b/audio/audio_state_unittest.cc
-index 7b6f9f5fdd..d5f4fb2542 100644
+index 7b6f9f5fdd..7546496a12 100644
 --- a/audio/audio_state_unittest.cc
 +++ b/audio/audio_state_unittest.cc
-@@ -419,6 +419,25 @@ TEST_P(AudioStateTest, AddStreamDoesNothingIfRecordingDisabled) {
+@@ -419,6 +419,42 @@ TEST_P(AudioStateTest, AddStreamDoesNothingIfRecordingDisabled) {
    audio_state->RemoveSendingStream(&stream);
  }
  
++TEST_P(AudioStateTest, DisablingWebRtcRecordingKeepsExternalDemand) {
++  ConfigHelper helper(GetParam());
++  scoped_refptr<internal::AudioState> audio_state(
++      make_ref_counted<internal::AudioState>(helper.config()));
++
++  auto* adm = reinterpret_cast<MockAudioDeviceModule*>(
++      helper.config().audio_device_module.get());
++  adm->SetExternalRecordingDemand(true);
++  adm->SetWebRtcRecordingDemand(true);
++
++  EXPECT_CALL(*adm, StopRecording()).Times(0);
++  audio_state->SetRecording(false);
++
++  EXPECT_TRUE(adm->ExternalRecordingDemand());
++  EXPECT_FALSE(adm->WebRtcRecordingDemand());
++}
++
 +TEST_P(AudioStateTest, ExternalDemandKeepsRecordingAfterLastStreamIsRemoved) {
 +  ConfigHelper helper(GetParam());
 +  scoped_refptr<internal::AudioState> audio_state(

@@ -15,6 +15,27 @@ using ::testing::InSequence;
 using ::testing::NiceMock;
 using ::testing::Return;
 
+TEST(ExternalRecordingDemandTest, DisablingWebRtcRecordingKeepsExternalDemand) {
+  AudioState::Config config;
+  config.audio_mixer = AudioMixerImpl::Create();
+  config.audio_processing = make_ref_counted<NiceMock<MockAudioProcessing>>();
+  config.audio_device_module =
+      make_ref_counted<NiceMock<MockAudioDeviceModule>>();
+
+  scoped_refptr<internal::AudioState> audio_state =
+      make_ref_counted<internal::AudioState>(config);
+  auto* adm =
+      static_cast<MockAudioDeviceModule*>(config.audio_device_module.get());
+  adm->SetExternalRecordingDemand(true);
+  adm->SetWebRtcRecordingDemand(true);
+
+  EXPECT_CALL(*adm, StopRecording()).Times(0);
+  audio_state->SetRecording(false);
+
+  EXPECT_TRUE(adm->ExternalRecordingDemand());
+  EXPECT_FALSE(adm->WebRtcRecordingDemand());
+}
+
 TEST(ExternalRecordingDemandTest, LastSenderRemovalKeepsRecording) {
   AudioState::Config config;
   config.audio_mixer = AudioMixerImpl::Create();
