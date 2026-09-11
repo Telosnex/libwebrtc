@@ -168,8 +168,7 @@ if [ "$arch" = "x64" ]; then
     cd "$OUTPUT_DIR"
     LD_LIBRARY_PATH=. ./libwebrtc_cpp_api_unittests \
       --gtest_filter='AudioProcessing.*:AudioDevice.RecordingStateReadbackHasNoCaptureSideEffect:AudioDevice.ActivePlayoutRouteReadbackIsGraceful'
-    ./external_recording_demand_unittests \
-      --gtest_filter='ExternalRecordingDemandTest.LastSenderRemovalKeepsRecording'
+    ./external_recording_demand_unittests
     ./capture_clock_policy_test
     ./tsnx_aec_guarantees_unittests
     python3 "$COMMAND_DIR/../test/aec_guarantees/smoke_replay.py" \

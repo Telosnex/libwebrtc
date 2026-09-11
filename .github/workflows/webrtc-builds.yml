@@ -169,6 +169,25 @@ jobs:
           name: libwebrtc-win-${{ matrix.arch }}-${{ matrix.profile }}
           path: build\libwebrtc-win-${{ matrix.arch }}-${{ matrix.profile }}.zip*
 
+      - name: Package same-build Windows tests
+        shell: pwsh
+        run: |
+          $dir = "build\win-${{ matrix.arch }}-${{ matrix.profile }}-tests"
+          $lines = Get-ChildItem $dir -File | Sort-Object Name | ForEach-Object {
+            "$((Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower())  $($_.Name)"
+          }
+          $lines | Set-Content -Encoding ascii "$dir\SHA256SUMS"
+          $zip = "build\libwebrtc-win-${{ matrix.arch }}-${{ matrix.profile }}-tests.zip"
+          Compress-Archive -Path $dir -DestinationPath $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          "$hash  $(Split-Path $zip -Leaf)" | Set-Content -Encoding ascii "$zip.shasum"
+
+      - name: Upload Windows test tools
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: libwebrtc-win-${{ matrix.arch }}-${{ matrix.profile }}-tests
+          path: build\libwebrtc-win-${{ matrix.arch }}-${{ matrix.profile }}-tests.zip*
+
   build-apple:
     if: github.event_name != 'workflow_dispatch' || github.event.inputs.build_apple == 'true'
     strategy:

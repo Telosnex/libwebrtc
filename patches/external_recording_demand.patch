@@ -469,15 +469,25 @@ index 5eedd83bb9..252234c7b3 100644
      JNIEnv* jni,
      jlong factory,
 diff --git a/sdk/objc/api/peerconnection/RTCAudioDeviceModule.h b/sdk/objc/api/peerconnection/RTCAudioDeviceModule.h
-index d46db26c23..2bf310a2bb 100644
+index d46db26c23..43c616ec5b 100644
 --- a/sdk/objc/api/peerconnection/RTCAudioDeviceModule.h
 +++ b/sdk/objc/api/peerconnection/RTCAudioDeviceModule.h
-@@ -219,6 +219,12 @@ RTC_OBJC_EXPORT
+@@ -219,6 +219,22 @@ RTC_OBJC_EXPORT
      (nullable RTC_OBJC_TYPE(RTCAudioProcessingOptions) *)options
      NS_SWIFT_NAME(initAndStartRecording(audioProcessingOptions:));
  
-+/// Prevents removal of the final WebRTC send stream from stopping recording.
-+/// The owner must clear this demand before explicitly stopping capture.
++/// Acquires app-owned capture on the ADM worker thread. AudioEngine options
++/// are applied in the same transaction as initialization and recording start.
++- (NSInteger)acquireExternalRecordingWithAudioProcessingOptions:
++    (nullable RTC_OBJC_TYPE(RTCAudioProcessingOptions) *)options
++    NS_SWIFT_NAME(acquireExternalRecording(audioProcessingOptions:));
++
++/// Releases app-owned capture without stopping an active WebRTC sender.
++/// A failed physical stop restores external demand so the owner can retry.
++- (NSInteger)releaseExternalRecording;
++
++/// Low-level demand state. This does not start or stop recording.
++/// Capture owners must use the acquire/release operations above.
 +@property(nonatomic, readonly, getter=hasExternalRecordingDemand)
 +    BOOL externalRecordingDemand;
 +- (NSInteger)setExternalRecordingDemand:(BOOL)enabled;
@@ -486,13 +496,36 @@ index d46db26c23..2bf310a2bb 100644
  
  // For testing purposes
 diff --git a/sdk/objc/api/peerconnection/RTCAudioDeviceModule.mm b/sdk/objc/api/peerconnection/RTCAudioDeviceModule.mm
-index 88e6934251..1682fe3ab0 100644
+index 88e6934251..6f6d376f30 100644
 --- a/sdk/objc/api/peerconnection/RTCAudioDeviceModule.mm
 +++ b/sdk/objc/api/peerconnection/RTCAudioDeviceModule.mm
-@@ -362,6 +362,16 @@ - (NSInteger)initAndStartRecordingWithAudioProcessingOptions:(RTC_OBJC_TYPE(RTCA
+@@ -362,6 +362,39 @@ - (NSInteger)initAndStartRecordingWithAudioProcessingOptions:(RTC_OBJC_TYPE(RTCA
    });
  }
  
++- (NSInteger)acquireExternalRecordingWithAudioProcessingOptions:
++    (RTC_OBJC_TYPE(RTCAudioProcessingOptions) *)options {
++  return _workerThread->BlockingCall([self, options] {
++    if (_audioDeviceModuleType != RTC_OBJC_TYPE(RTCAudioDeviceModuleTypeAudioEngine)) {
++      return static_cast<NSInteger>(_native->AcquireExternalRecording());
++    }
++
++    // AudioEngine combines options, initialization, and start in one state
++    // transition. Keep ownership in this worker-thread transaction as well.
++    const bool previous_demand = _native->ExternalRecordingDemand();
++    _native->SetExternalRecordingDemand(true);
++    const NSInteger result = [self initAndStartRecordingWithAudioProcessingOptions:options];
++    if (result != 0) {
++      _native->SetExternalRecordingDemand(previous_demand);
++    }
++    return result;
++  });
++}
++
++- (NSInteger)releaseExternalRecording {
++  return _workerThread->BlockingCall([self] { return _native->ReleaseExternalRecording(); });
++}
++
 +- (BOOL)hasExternalRecordingDemand {
 +  return _workerThread->BlockingCall(
 +      [self] { return _native->ExternalRecordingDemand(); });

@@ -40,6 +40,7 @@ echo "Commit: !commit!"
 
 if not exist depot_tools (
   git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
+  if errorlevel 1 exit /b 1
 )
 
 set COMMAND_DIR=%~dp0
@@ -68,15 +69,21 @@ echo "Checkout ref: !checkout_ref!"
 
 if not exist src (
   call git clone https://github.com/webrtc-sdk/webrtc.git src
+if errorlevel 1 exit /b 1
 )
 
 pushd src
+if errorlevel 1 exit /b 1
 call git fetch
+if errorlevel 1 exit /b 1
 call git checkout -f "!checkout_ref!"
+if errorlevel 1 exit /b 1
 call git clean -df
+if errorlevel 1 exit /b 1
 popd
 
 call gclient.bat sync --with_branch_heads --jobs=8
+if errorlevel 1 exit /b 1
 
 
 if not exist src/libwebrtc (
@@ -113,6 +120,7 @@ if "!profile!" == "debug" (
 rem generate ninja for release
 call gn.bat gen %OUTPUT_DIR% --root="src" ^
   --args="is_debug=!debug! is_clang=true target_cpu=\"!arch!\" use_custom_libcxx=false rtc_libvpx_build_vp9=true enable_libaom=true rtc_include_tests=true rtc_build_examples=false rtc_build_tools=false is_component_build=false rtc_enable_protobuf=false rtc_use_h264=true ffmpeg_branding=\"Chrome\" symbol_level=0 enable_iterator_debugging=false"
+if errorlevel 1 exit /b 1
 
 rem Build the artifact and its focused wrapper/core ownership tests.
 ninja.exe -C %OUTPUT_DIR% libwebrtc libwebrtc_cpp_api_unittests external_recording_demand_unittests
@@ -123,10 +131,18 @@ if "!arch!" == "x64" (
   %OUTPUT_DIR%\libwebrtc_cpp_api_unittests.exe --gtest_filter=AudioProcessing.*:AudioDevice.RecordingStateReadbackHasNoCaptureSideEffect:AudioDevice.ActivePlayoutRouteReadbackIsGraceful
   if errorlevel 1 exit /b 1
 
-  %OUTPUT_DIR%\external_recording_demand_unittests.exe --gtest_filter=ExternalRecordingDemandTest.LastSenderRemovalKeepsRecording
+  %OUTPUT_DIR%\external_recording_demand_unittests.exe
   if errorlevel 1 exit /b 1
 ) else (
   echo ARM64 tests compiled; execution requires an ARM64 host.
+)
+
+rem Retain same-build tests for x64 and ARM64 qualification without devices.
+set "TESTS_DIR=%cd%\win-!arch!-!profile!-tests"
+if not exist "!TESTS_DIR!" mkdir "!TESTS_DIR!"
+for %%F in (libwebrtc.dll libwebrtc_cpp_api_unittests.exe external_recording_demand_unittests.exe) do (
+  copy /Y "%OUTPUT_DIR%\%%F" "!TESTS_DIR!\" >nul
+  if errorlevel 1 exit /b 1
 )
 
 rem copy static library for release build
@@ -137,4 +153,5 @@ rem copy license
 copy "src\libwebrtc\LICENSE" "%ARTIFACTS_DIR%\"
 
 rem copy header
-xcopy "src\libwebrtc\include\*.h" "%ARTIFACTS_DIR%\include" /C /S /I /F /H
+xcopy "src\libwebrtc\include\*.h" "%ARTIFACTS_DIR%\include" /S /I /F /H
+if errorlevel 1 exit /b 1

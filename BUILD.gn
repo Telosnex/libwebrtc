@@ -98,6 +98,25 @@ if (rtc_include_tests && is_linux) {
   }
 }
 
+if (rtc_include_tests && is_mac) {
+  rtc_test("external_recording_demand_objc_unittests") {
+    testonly = true
+    sources = [ "test/external_recording_demand_objc.test.mm" ]
+    configs += [ "//:common_objc" ]
+    deps = [
+      "//api:make_ref_counted",
+      "//api:scoped_refptr",
+      "//api/audio:audio_device",
+      "//sdk:base_objc",
+      "//modules/audio_device:mock_audio_device",
+      "//rtc_base:threading",
+      "//sdk:peerconnectionfactory_base_objc",
+      "//test:test_main",
+      "//test:test_support",
+    ]
+  }
+}
+
 if (rtc_include_tests) {
   rtc_executable("capture_clock_policy_test") {
     testonly = true

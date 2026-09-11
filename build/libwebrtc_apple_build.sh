@@ -90,6 +90,31 @@ run_gclient_sync
     --verbose --ignore-space-change --ignore-whitespace --whitespace=nowarn
 )
 
+# Run the real Objective-C bridge against a mock ADM before the long slice
+# build. This checks worker dispatch and sender-aware release without devices.
+# The recipe operates in a disposable checkout, as do the desktop recipes.
+mkdir -p src/libwebrtc
+cp -R "$SCRIPT_DIR/../include" "$SCRIPT_DIR/../src" \
+  "$SCRIPT_DIR/../test" src/libwebrtc/
+cp "$SCRIPT_DIR/../BUILD.gn" src/libwebrtc/
+(
+  cd src
+  git apply "$SCRIPT_DIR/../patches/add_libwebrtc_build_target.patch" \
+    --verbose --ignore-space-change --ignore-whitespace --whitespace=nowarn
+)
+case "$(uname -m)" in
+  arm64) TEST_CPU=arm64 ;;
+  x86_64) TEST_CPU=x64 ;;
+  *) echo "Unsupported Apple test host" >&2; exit 1 ;;
+esac
+gn gen "$OUT_DIR/ownership-tests" --root=src --args="
+  target_os=\"mac\" target_cpu=\"$TEST_CPU\"
+  is_debug=$DEBUG is_component_build=false
+  rtc_include_tests=true rtc_build_examples=false rtc_enable_protobuf=false
+  rtc_use_h264=false use_rtti=true"
+ninja -C "$OUT_DIR/ownership-tests" external_recording_demand_objc_unittests -j 10
+"$OUT_DIR/ownership-tests/external_recording_demand_objc_unittests"
+
 echo "xcframework_dynamic_build.sh: MODE=$MODE, DEBUG=$DEBUG, COMMIT=$COMMIT"
 
 gn gen $OUT_DIR/tvOS-arm64-device --root="src" --args="    
