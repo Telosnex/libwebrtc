@@ -1,5 +1,8 @@
 #!/bin/sh
 
+# Never package an unpatched or partially failed native build.
+set -e
+
 MODE=""
 COMMIT=""
 
