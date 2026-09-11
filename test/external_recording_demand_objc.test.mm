@@ -15,6 +15,10 @@
 @end
 
 @implementation TestOptionsRecordingModule
+@synthesize startResult = _startResult;
+@synthesize expectedWorker = _expectedWorker;
+@synthesize receivedOptions = _receivedOptions;
+
 - (NSInteger)initAndStartRecordingWithAudioProcessingOptions:
     (RTC_OBJC_TYPE(RTCAudioProcessingOptions) *)options {
   EXPECT_TRUE(self.expectedWorker->IsCurrent());
