@@ -14,14 +14,15 @@
 // is established.
 //
 // GUARANTEES (fleet-free, by construction):
-//   G1 If |measured drift| < kEngagePpm, the resampler NEVER engages and the
-//      byte path is identical to a build without this class (bit-exact).
+//   G1 An initially in-spec path never engages and remains bit-exact. After
+//      engagement, unity correction retains the buffered timeline; reverting
+//      to raw passthrough would drop queued audio and jump capture time.
 //   G2 Correction ratio is clamped to +/-kMaxCorrectionPpm and slewed at
 //      <= kMaxSlewPpmPerUpdate per estimator update; anomalous measurements
 //      (|drift| > kAnomalyPpm, stream gaps, xrun-like jumps) freeze the servo
 //      at its last ratio rather than chase them.
-//   G3 Output framing to the delegate is exact 10 ms blocks; worst-case added
-//      capture latency is bounded by kMaxFifoFrames (< 30 ms).
+//   G3 Output framing is exact 10 ms blocks. Resampler input requests use the
+//      same 10 ms quantum to avoid artificial periodic gap/burst pairs.
 #ifndef INTERNAL_DRIFT_SERVO_H_
 #define INTERNAL_DRIFT_SERVO_H_
 
@@ -41,9 +42,9 @@ class DriftServo {
   struct Stats {
     double measured_ppm = 0.0;  // raw relative drift estimate
     double applied_ppm = 0.0;   // current resampler correction
-    bool engaged = false;
-    int64_t windows = 0;    // completed callback estimator windows
-    int64_t anomalies = 0;  // rejected callback measurements
+    bool engaged = false;       // buffered path active, possibly at unity ratio
+    int64_t windows = 0;        // completed callback estimator windows
+    int64_t anomalies = 0;      // rejected callback measurements
     bool hardware_ready = false;
     bool hardware_controlling = false;
     double hardware_measured_ppm = 0.0;
@@ -71,7 +72,7 @@ class DriftServo {
   // rate for that callback.
   void OnRenderFrames(size_t frames, uint32_t sample_rate_hz);
 
-  // Capture side. Input: interleaved S16, mono only (bypasses otherwise).
+  // Capture side. Input: interleaved S16, mono or stereo.
   // Returns number of complete 10 ms output blocks now available.
   // Caller then drains with PopBlock(). If the servo is bypassed/disengaged,
   // returns 0 and the caller must use the original buffer unchanged (G1).

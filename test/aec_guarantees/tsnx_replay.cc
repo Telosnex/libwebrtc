@@ -1,11 +1,11 @@
-// Offline session replay: drives the real APM/AEC3 with a recorded tap-v2
+// Offline session replay: drives the real APM/AEC3 with a recorded tap-v3
 // bundle (manifest.json + headerless PCM + microsecond pacing logs), optionally
 // routing capture through DriftServo first. Legacy WAV/v1-log bundles remain
 // readable for the original field evidence.
 //
 // Usage:
 //   tsnx_replay <dir> [--servo | --hw-servo] [--seed <ppm>]
-//               [--ratio <ppm>] [--output <wav>]
+//               [--ratio <ppm>] [--live-profile] [--output <wav>]
 //
 // The default output is <dir>/replay_after_aec_<mode>.wav. Per-second APM
 // statistics are emitted as CSV on stdout. Set TSNX_REPLAY_FULL=1 to exercise
@@ -270,6 +270,7 @@ struct FixedResampler : webrtc::SincResamplerCallback {
 
 struct Options {
   std::string dir;
+  bool live_profile = false;
   bool servo = false;
   bool hardware_servo = false;
   bool fixed = false;
@@ -284,7 +285,7 @@ Options ParseOptions(int argc, char** argv) {
     Fail(
         "usage: tsnx_replay <dir> "
         "[--servo | --hw-servo] [--seed <ppm>] [--ratio <ppm>] "
-        "[--output <wav>]");
+        "[--live-profile] [--output <wav>]");
   }
   Options options;
   options.dir = argv[1];
@@ -307,6 +308,8 @@ Options ParseOptions(int argc, char** argv) {
       if (++i >= argc) Fail("--seed requires a ppm value");
       options.seed = true;
       options.seed_ppm = atof(argv[i]);
+    } else if (arg == "--live-profile") {
+      options.live_profile = true;
     } else if (arg == "--output") {
       if (++i >= argc) Fail("--output requires a path");
       options.output = argv[i];
@@ -399,11 +402,26 @@ int main(int argc, char** argv) {
   config.echo_canceller.enabled = true;
   config.noise_suppression.enabled = true;
   config.high_pass_filter.enabled = true;
+  // Explicit opt-in: historical replay omitted gain control and used default
+  // NS. This matches the inspected live capture profile, not session lifecycle
+  // or hardware gain. Delay is the existing nominal 50ms replay assumption.
+  if (options.live_profile) {
+    if (format.capture_raw.channels > 2)
+      Fail("--live-profile supports mono/stereo capture");
+    config.noise_suppression.level =
+        webrtc::AudioProcessing::Config::NoiseSuppression::kHigh;
+    config.gain_controller1.enabled = true;
+    config.gain_controller1.mode =
+        webrtc::AudioProcessing::Config::GainController1::kAdaptiveAnalog;
+  }
+  fprintf(stderr, "capture_profile=%s\n",
+          options.live_profile ? "live (AGC1/high-NS/premix/50ms)" : "legacy");
   auto apm = webrtc::BuiltinAudioProcessingBuilder(config).Build(
       webrtc::CreateEnvironment());
 
-  const webrtc::StreamConfig capture_in(format.capture_raw.rate,
-                                        format.capture_raw.channels);
+  const webrtc::StreamConfig capture_in(
+      format.capture_raw.rate,
+      options.live_profile ? 1 : format.capture_raw.channels);
   const webrtc::StreamConfig capture_out(format.capture_raw.rate, 1);
   const webrtc::StreamConfig render_config(format.render.rate,
                                            format.render.channels);
@@ -441,7 +459,19 @@ int main(int argc, char** argv) {
   double render_energy = 0.0;
   size_t render_samples = 0;
 
+  std::vector<int16_t> mono(capture_block);
+  std::ofstream output_timing(options.output + ".log");
+  if (!output_timing) Fail("cannot open output pacing log");
   auto process_capture = [&](const int16_t* input, int64_t event_us) {
+    if (options.live_profile) {
+      if (format.capture_raw.channels == 2) {
+        for (size_t i = 0; i < capture_block; ++i)
+          mono[i] = (static_cast<int32_t>(input[2 * i]) + input[2 * i + 1]) / 2;
+        input = mono.data();
+      }
+      apm->set_stream_delay_ms(50);
+    }
+    output_timing << event_us << " " << capture_block << "\n";
     if (apm->ProcessStream(input, capture_in, capture_out, processed.data()) !=
         webrtc::AudioProcessing::kNoError) {
       Fail("APM rejected a capture block");
@@ -558,6 +588,8 @@ int main(int argc, char** argv) {
     }
   }
 
+  output_timing.flush();
+  if (!output_timing) Fail("failed writing output pacing log");
   const auto final_servo_stats = servo.GetStats();
   fprintf(stderr, "consumed render=%zu/%zu capture=%zu/%zu samples; wrote %s\n",
           render_position, render.size(), capture_position, capture.size(),

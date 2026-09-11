@@ -84,15 +84,16 @@ void DriftServo::UpdateEstimate() RTC_EXCLUSIVE_LOCKS_REQUIRED(lock_) {
       RTC_LOG(LS_WARNING) << "DriftServo ENGAGED (snap): " << drift_ppm
                           << " ppm";
     }
-  } else if (std::abs(drift_ppm) + noise_bound_ppm < kDisengagePpm) {
-    engaged_.store(false, std::memory_order_relaxed);
-    applied_ratio_ = 1.0;
-    RTC_LOG(LS_WARNING) << "DriftServo disengaged (drift " << drift_ppm
-                        << " ppm)";
   }
+  // A unity ratio is not permission to discard queued capture samples.
+  // Retain the active timeline and slew to unity instead of returning raw PCM.
+  const bool in_spec =
+      currently && std::abs(drift_ppm) + noise_bound_ppm < kDisengagePpm;
   // Slew applied ratio toward target, clamped (G2).
-  double target = std::clamp(smoothed_ratio_, 1.0 - kMaxCorrectionPpm * 1e-6,
-                             1.0 + kMaxCorrectionPpm * 1e-6);
+  const double target =
+      in_spec ? 1.0
+              : std::clamp(smoothed_ratio_, 1.0 - kMaxCorrectionPpm * 1e-6,
+                           1.0 + kMaxCorrectionPpm * 1e-6);
   const double max_step = kMaxSlewPpmPerUpdate * 1e-6;
   applied_ratio_ += std::clamp(target - applied_ratio_, -max_step, max_step);
   RTC_LOG(LS_INFO) << "DriftServo window " << windows_ << ": measured " << ppm
@@ -179,8 +180,10 @@ void DriftServo::ApplyHardwareEstimate(
   applied_ratio_ += std::clamp(target - applied_ratio_, -max_step, max_step);
   if (in_spec && std::abs(applied_ratio_ - 1.0) < 1e-9) {
     applied_ratio_ = 1.0;
-    engaged_.store(false, std::memory_order_relaxed);
-    RTC_LOG(LS_WARNING) << "DriftServo hardware disengaged in-spec";
+    // Switching to raw passthrough drops the queued input and jumps capture
+    // time forward. Re-engagement then inserts the buffering delay again.
+    // Retain the active pipeline at unity; initially in-spec paths still never
+    // engage. This is independent of the hardware estimator's ownership.
   }
 }
 
@@ -202,9 +205,12 @@ size_t DriftServo::PushCaptureAndCorrect(const int16_t* samples, size_t frames,
   }
   if (resampler_rate_ != sample_rate_hz || active_channels_ != channels ||
       !capture_saw_engaged_) {
+    // The default 512-frame read quantum beats against 480-frame callbacks:
+    // an artificial no-output callback followed by a two-block burst occurs
+    // roughly every 160 ms, even when actual drift is only a few hundred ppm.
     for (size_t ch = 0; ch < channels; ++ch) {
       chan_[ch].rs = std::make_unique<SincResampler>(
-          applied, SincResampler::kDefaultRequestSize, &chan_[ch]);
+          applied, sample_rate_hz / 100, &chan_[ch]);
       chan_[ch].in_fifo.clear();
     }
     out_fifo_.clear();
@@ -226,8 +232,7 @@ size_t DriftServo::PushCaptureAndCorrect(const int16_t* samples, size_t frames,
   const size_t block = sample_rate_hz / 100;  // 10 ms frames
   std::vector<float> tmp(block);
   const size_t need = static_cast<size_t>(block * applied) +
-                      2 * SincResampler::kKernelSize +
-                      SincResampler::kDefaultRequestSize;
+                      2 * SincResampler::kKernelSize + block;
   while (chan_[0].in_fifo.size() > need) {
     const size_t base = out_fifo_.size();
     out_fifo_.resize(base + block * channels);

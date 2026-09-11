@@ -83,6 +83,7 @@ if (rtc_include_tests && is_linux) {
       "src/internal/session_tap.cc",
       "src/internal/session_tap.h",
       "test/aec_guarantees/aec_guarantees.test.cc",
+      "test/aec_guarantees/drift_pacing.test.cc",
       "src/internal/audio_clock_correction.cc",
       "src/internal/audio_clock_correction.h",
       "src/internal/capture_clock_policy.h",

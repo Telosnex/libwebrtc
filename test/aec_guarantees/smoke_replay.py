@@ -117,7 +117,20 @@ def main() -> None:
             assert wav.getsampwidth() == 2
             assert wav.getnframes() > FRAMES * BLOCK * 0.95
             assert wav.getnframes() < FRAMES * BLOCK * 1.05
-        print("tap-v3 hardware-servo replay smoke passed")
+        live_output = bundle / "live-profile.wav"
+        live = subprocess.run(
+            [str(replay), str(bundle), "--hw-servo", "--live-profile",
+             "--output", str(live_output)],
+            check=True, capture_output=True, text=True, env=env,
+        )
+        assert "capture_profile=live" in live.stderr
+        with wave.open(str(live_output), "rb") as wav:
+            assert (wav.getframerate(), wav.getnchannels(), wav.getsampwidth()) == (RATE, 1, 2)
+            timing = [line.split() for line in pathlib.Path(str(live_output) + ".log").read_text().splitlines()]
+            assert len(timing) * BLOCK == wav.getnframes()
+            assert all(int(frames) == BLOCK for _, frames in timing)
+        assert live_output.read_bytes() != output.read_bytes(), "live profile had no effect"
+        print("tap-v3 hardware-servo replay smoke passed (legacy and live profiles)")
 
 
 if __name__ == "__main__":
