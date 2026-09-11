@@ -1,5 +1,5 @@
 diff --git a/api/audio/audio_device.h b/api/audio/audio_device.h
-index 37af03d8ca..59eac970fe 100644
+index 37af03d8ca..26ca2e0943 100644
 --- a/api/audio/audio_device.h
 +++ b/api/audio/audio_device.h
 @@ -11,6 +11,7 @@
@@ -10,7 +10,7 @@ index 37af03d8ca..59eac970fe 100644
  #include <cstdint>
  #include <optional>
  
-@@ -162,6 +163,18 @@ class AudioDeviceModule : public RefCountInterface {
+@@ -162,6 +163,52 @@ class AudioDeviceModule : public RefCountInterface {
    virtual int32_t StopRecording() = 0;
    virtual bool Recording() const = 0;
  
@@ -26,28 +26,90 @@ index 37af03d8ca..59eac970fe 100644
 +    return external_recording_demand_.load();
 +  }
 +
++  // These lifecycle helpers must run on the ADM's owning thread. They arbitrate
++  // app-owned capture with WebRTC senders so neither owner stops the other.
++  int32_t AcquireExternalRecording() {
++    int32_t result = SetExternalRecordingDemand(true);
++    if (result == 0 && !RecordingIsInitialized()) {
++      result = InitRecording();
++    }
++    if (result == 0 && !Recording()) {
++      result = StartRecording();
++    }
++    if (result != 0) {
++      SetExternalRecordingDemand(false);
++    }
++    return result;
++  }
++  int32_t ReleaseExternalRecording() {
++    const int32_t result = SetExternalRecordingDemand(false);
++    if (result != 0 || WebRtcRecordingDemand() || !Recording()) {
++      return result;
++    }
++    const int32_t stop_result = StopRecording();
++    if (stop_result != 0) {
++      SetExternalRecordingDemand(true);
++    }
++    return stop_result;
++  }
++
++  void SetWebRtcRecordingDemand(bool enabled) {
++    webrtc_recording_demand_.store(enabled);
++  }
++  bool WebRtcRecordingDemand() const {
++    return webrtc_recording_demand_.load();
++  }
++
    // Audio mixer initialization
    virtual int32_t InitSpeaker() = 0;
    virtual bool SpeakerIsInitialized() const = 0;
-@@ -262,6 +275,9 @@ class AudioDeviceModule : public RefCountInterface {
+@@ -262,6 +309,10 @@ class AudioDeviceModule : public RefCountInterface {
  
   protected:
    ~AudioDeviceModule() override {}
 +
 + private:
 +  std::atomic_bool external_recording_demand_{false};
++  std::atomic_bool webrtc_recording_demand_{false};
  };
  
  // Extends the default ADM interface with some extra test methods.
 diff --git a/audio/audio_state.cc b/audio/audio_state.cc
-index aab979facd..097087bfe7 100644
+index aab979facd..4acd0b3d4d 100644
 --- a/audio/audio_state.cc
 +++ b/audio/audio_state.cc
-@@ -168,8 +168,12 @@ void AudioState::RemoveSendingStream(webrtc::AudioSendStream* stream) {
-   auto count = sending_streams_.erase(stream);
+@@ -120,6 +120,7 @@ void AudioState::SetRecording(bool enabled) {
+   auto* adm = config_.audio_device_module.get();
+   if (enabled) {
+     if (!sending_streams_.empty()) {
++      adm->SetWebRtcRecordingDemand(true);
+       if (!adm->Recording()) {
+         if (adm->InitRecording() == 0) {
+           adm->StartRecording();
+@@ -128,6 +129,7 @@ void AudioState::SetRecording(bool enabled) {
+     }
+   } else {
+     // Disable recording.
++    adm->SetWebRtcRecordingDemand(false);
+     adm->StopRecording();
+   }
+   recording_enabled_ = enabled;
+@@ -144,6 +146,9 @@ void AudioState::AddSendingStream(webrtc::AudioSendStream* stream,
+ 
+   // Make sure recording is initialized; start recording if enabled.
+   auto* adm = config_.audio_device_module.get();
++  if (recording_enabled_) {
++    adm->SetWebRtcRecordingDemand(true);
++  }
+   if (!adm->Recording()) {
+     if (adm->InitRecording() == 0) {
+       if (recording_enabled_) {
+@@ -169,7 +174,14 @@ void AudioState::RemoveSendingStream(webrtc::AudioSendStream* stream) {
    RTC_DCHECK_EQ(1, count);
    UpdateAudioTransportWithSendingStreams();
--  if (sending_streams_.empty()) {
+   if (sending_streams_.empty()) {
++    config_.audio_device_module->SetWebRtcRecordingDemand(false);
++  }
 +  if (sending_streams_.empty() &&
 +      !config_.audio_device_module->ExternalRecordingDemand()) {
      config_.audio_device_module->StopRecording();
@@ -58,10 +120,10 @@ index aab979facd..097087bfe7 100644
  }
  
 diff --git a/audio/audio_state_unittest.cc b/audio/audio_state_unittest.cc
-index 7b6f9f5fdd..eb20573a03 100644
+index 7b6f9f5fdd..d5f4fb2542 100644
 --- a/audio/audio_state_unittest.cc
 +++ b/audio/audio_state_unittest.cc
-@@ -419,6 +419,24 @@ TEST_P(AudioStateTest, AddStreamDoesNothingIfRecordingDisabled) {
+@@ -419,6 +419,25 @@ TEST_P(AudioStateTest, AddStreamDoesNothingIfRecordingDisabled) {
    audio_state->RemoveSendingStream(&stream);
  }
  
@@ -81,11 +143,305 @@ index 7b6f9f5fdd..eb20573a03 100644
 +  EXPECT_CALL(*adm, StopRecording()).Times(0);
 +  audio_state->RemoveSendingStream(&stream);
 +  EXPECT_TRUE(adm->ExternalRecordingDemand());
++  EXPECT_FALSE(adm->WebRtcRecordingDemand());
 +}
 +
  TEST_P(AudioStateTest, AlwaysCallInitRecordingBeforeStartRecording) {
    ConfigHelper helper(GetParam());
    scoped_refptr<internal::AudioState> audio_state(
+diff --git a/sdk/android/api/org/webrtc/PeerConnectionFactory.java b/sdk/android/api/org/webrtc/PeerConnectionFactory.java
+index 8c0a58050d..f837e90b33 100644
+--- a/sdk/android/api/org/webrtc/PeerConnectionFactory.java
++++ b/sdk/android/api/org/webrtc/PeerConnectionFactory.java
+@@ -538,6 +538,39 @@ public class PeerConnectionFactory {
+     return nativeGetAudioProcessingState(nativeFactory);
+   }
+ 
++  /** Factory-scoped native recording state shared by WebRTC senders and app-owned capture. */
++  public static final class AudioRecordingState {
++    public final boolean available;
++    public final boolean initialized;
++    public final boolean recording;
++    public final boolean externalDemand;
++
++    private AudioRecordingState(int bits) {
++      available = (bits & 1) != 0;
++      initialized = (bits & 2) != 0;
++      recording = (bits & 4) != 0;
++      externalDemand = (bits & 8) != 0;
++    }
++  }
++
++  /** Acquires app-owned ADM recording on the native WebRTC worker thread. */
++  public int acquireAudioRecording() {
++    checkPeerConnectionFactoryExists();
++    return nativeAcquireAudioRecording(nativeFactory);
++  }
++
++  /** Releases app-owned ADM recording without stopping an active WebRTC sender. */
++  public int releaseAudioRecording() {
++    checkPeerConnectionFactoryExists();
++    return nativeReleaseAudioRecording(nativeFactory);
++  }
++
++  /** Returns one worker-thread-consistent ADM recording state snapshot. */
++  public AudioRecordingState getAudioRecordingState() {
++    checkPeerConnectionFactoryExists();
++    return new AudioRecordingState(nativeGetAudioRecordingState(nativeFactory));
++  }
++
+   public void dispose() {
+     checkPeerConnectionFactoryExists();
+     nativeFreeFactory(nativeFactory);
+@@ -662,6 +695,9 @@ public class PeerConnectionFactory {
+       long factory, int file_descriptor, int filesize_limit_bytes);
+   private static native void nativeStopAecDump(long factory);
+   private static native AudioProcessingState nativeGetAudioProcessingState(long factory);
++  private static native int nativeAcquireAudioRecording(long factory);
++  private static native int nativeReleaseAudioRecording(long factory);
++  private static native int nativeGetAudioRecordingState(long factory);
+   private static native void nativeFreeFactory(long factory);
+   private static native long nativeGetNativePeerConnectionFactory(long factory);
+   private static native void nativeInjectLoggable(JNILogging jniLogging, int severity);
+diff --git a/sdk/android/api/org/webrtc/audio/JavaAudioDeviceModule.java b/sdk/android/api/org/webrtc/audio/JavaAudioDeviceModule.java
+index 35502ee832..557cfdaf55 100644
+--- a/sdk/android/api/org/webrtc/audio/JavaAudioDeviceModule.java
++++ b/sdk/android/api/org/webrtc/audio/JavaAudioDeviceModule.java
+@@ -509,6 +509,10 @@ public class JavaAudioDeviceModule implements AudioDeviceModule {
+     requestStartRecording(null);
+   }
+ 
++  public void applyAudioProcessingOptions(@Nullable AudioProcessingOptions options) {
++    audioInput.applyPlatformAudioProcessingOptions(options);
++  }
++
+   public void requestStartRecording(@Nullable AudioProcessingOptions options) {
+     audioInput.applyPlatformAudioProcessingOptions(options);
+     audioInput.initRecordingIfNeeded();
+diff --git a/sdk/android/src/jni/pc/owned_factory_and_threads.cc b/sdk/android/src/jni/pc/owned_factory_and_threads.cc
+index ccf360c9b2..41c5eb9e95 100644
+--- a/sdk/android/src/jni/pc/owned_factory_and_threads.cc
++++ b/sdk/android/src/jni/pc/owned_factory_and_threads.cc
+@@ -13,6 +13,7 @@
+ #include <memory>
+ #include <utility>
+ 
++#include "api/audio/audio_device.h"
+ #include "api/peer_connection_interface.h"
+ #include "api/scoped_refptr.h"
+ #include "rtc_base/socket_factory.h"
+@@ -26,12 +27,14 @@ OwnedFactoryAndThreads::OwnedFactoryAndThreads(
+     std::unique_ptr<Thread> network_thread,
+     std::unique_ptr<Thread> worker_thread,
+     std::unique_ptr<Thread> signaling_thread,
+-    const scoped_refptr<PeerConnectionFactoryInterface>& factory)
++    const scoped_refptr<PeerConnectionFactoryInterface>& factory,
++    scoped_refptr<AudioDeviceModule> audio_device_module)
+     : socket_factory_(std::move(socket_factory)),
+       network_thread_(std::move(network_thread)),
+       worker_thread_(std::move(worker_thread)),
+       signaling_thread_(std::move(signaling_thread)),
+-      factory_(factory) {}
++      factory_(factory),
++      audio_device_module_(std::move(audio_device_module)) {}
+ 
+ }  // namespace jni
+ }  // namespace webrtc
+diff --git a/sdk/android/src/jni/pc/owned_factory_and_threads.h b/sdk/android/src/jni/pc/owned_factory_and_threads.h
+index 4b22cb95ad..bd8ce8bd71 100644
+--- a/sdk/android/src/jni/pc/owned_factory_and_threads.h
++++ b/sdk/android/src/jni/pc/owned_factory_and_threads.h
+@@ -11,9 +11,9 @@
+ #ifndef SDK_ANDROID_SRC_JNI_PC_OWNED_FACTORY_AND_THREADS_H_
+ #define SDK_ANDROID_SRC_JNI_PC_OWNED_FACTORY_AND_THREADS_H_
+ 
+-
+ #include <memory>
+ 
++#include "api/audio/audio_device.h"
+ #include "api/peer_connection_interface.h"
+ #include "api/scoped_refptr.h"
+ #include "rtc_base/socket_factory.h"
+@@ -35,7 +35,8 @@ class OwnedFactoryAndThreads {
+       std::unique_ptr<Thread> network_thread,
+       std::unique_ptr<Thread> worker_thread,
+       std::unique_ptr<Thread> signaling_thread,
+-      const scoped_refptr<PeerConnectionFactoryInterface>& factory);
++      const scoped_refptr<PeerConnectionFactoryInterface>& factory,
++      scoped_refptr<AudioDeviceModule> audio_device_module = nullptr);
+ 
+   ~OwnedFactoryAndThreads() = default;
+ 
+@@ -44,6 +45,9 @@ class OwnedFactoryAndThreads {
+   Thread* network_thread() { return network_thread_.get(); }
+   Thread* signaling_thread() { return signaling_thread_.get(); }
+   Thread* worker_thread() { return worker_thread_.get(); }
++  const scoped_refptr<AudioDeviceModule>& audio_device_module() const {
++    return audio_device_module_;
++  }
+ 
+  private:
+   // Usually implemented by the SocketServer associated with the network thread,
+@@ -53,6 +57,7 @@ class OwnedFactoryAndThreads {
+   const std::unique_ptr<Thread> worker_thread_;
+   const std::unique_ptr<Thread> signaling_thread_;
+   const scoped_refptr<PeerConnectionFactoryInterface> factory_;
++  const scoped_refptr<AudioDeviceModule> audio_device_module_;
+ };
+ 
+ }  // namespace jni
+diff --git a/sdk/android/src/jni/pc/peer_connection_factory.cc b/sdk/android/src/jni/pc/peer_connection_factory.cc
+index 5eedd83bb9..252234c7b3 100644
+--- a/sdk/android/src/jni/pc/peer_connection_factory.cc
++++ b/sdk/android/src/jni/pc/peer_connection_factory.cc
+@@ -152,10 +152,12 @@ ScopedJavaLocalRef<jobject> NativeToScopedJavaPeerConnectionFactory(
+     std::unique_ptr<SocketFactory> socket_factory,
+     std::unique_ptr<Thread> network_thread,
+     std::unique_ptr<Thread> worker_thread,
+-    std::unique_ptr<Thread> signaling_thread) {
++    std::unique_ptr<Thread> signaling_thread,
++    scoped_refptr<AudioDeviceModule> audio_device_module) {
+   OwnedFactoryAndThreads* owned_factory = new OwnedFactoryAndThreads(
+       std::move(socket_factory), std::move(network_thread),
+-      std::move(worker_thread), std::move(signaling_thread), pcf);
++      std::move(worker_thread), std::move(signaling_thread), pcf,
++      std::move(audio_device_module));
+ 
+   jni_zero::ScopedJavaLocalRef<jobject> j_pcf =
+       Java_PeerConnectionFactory_Constructor(
+@@ -171,8 +173,12 @@ ScopedJavaLocalRef<jobject> NativeToScopedJavaPeerConnectionFactory(
+   return j_pcf;
+ }
+ 
++OwnedFactoryAndThreads* OwnedFactoryFromJava(jlong j_p) {
++  return reinterpret_cast<OwnedFactoryAndThreads*>(j_p);
++}
++
+ PeerConnectionFactoryInterface* PeerConnectionFactoryFromJava(jlong j_p) {
+-  return reinterpret_cast<OwnedFactoryAndThreads*>(j_p)->factory();
++  return OwnedFactoryFromJava(j_p)->factory();
+ }
+ 
+ }  // namespace
+@@ -195,7 +201,7 @@ jobject NativeToJavaPeerConnectionFactory(
+     std::unique_ptr<Thread> signaling_thread) {
+   return NativeToScopedJavaPeerConnectionFactory(
+              jni, pcf, std::move(socket_factory), std::move(network_thread),
+-             std::move(worker_thread), std::move(signaling_thread))
++             std::move(worker_thread), std::move(signaling_thread), nullptr)
+       .Release();
+ }
+ 
+@@ -315,6 +321,8 @@ ScopedJavaLocalRef<jobject> CreatePeerConnectionFactoryForJava(
+         std::make_unique<AndroidNetworkMonitorFactory>();
+   }
+ 
++  scoped_refptr<AudioDeviceModule> owned_audio_device_module =
++      audio_device_module;
+   dependencies.adm = std::move(audio_device_module);
+   dependencies.audio_encoder_factory = std::move(audio_encoder_factory);
+   dependencies.audio_decoder_factory = std::move(audio_decoder_factory);
+@@ -346,7 +354,8 @@ ScopedJavaLocalRef<jobject> CreatePeerConnectionFactoryForJava(
+ 
+   return NativeToScopedJavaPeerConnectionFactory(
+       jni, factory, std::move(socket_server), std::move(network_thread),
+-      std::move(worker_thread), std::move(signaling_thread));
++      std::move(worker_thread), std::move(signaling_thread),
++      std::move(owned_audio_device_module));
+ }
+ 
+ static jni_zero::ScopedJavaLocalRef<jobject>
+@@ -478,24 +487,32 @@ static void JNI_PeerConnectionFactory_StopAecDump(JNIEnv* jni,
+ // Builds org.webrtc.audio.AudioProcessingState (and its component states)
+ // through the jni_zero-generated constructors. Tri-state diagnostics collapse
+ // to false at this boundary; the lossless representation stays in C++.
+-static jni_zero::ScopedJavaLocalRef<jobject> NativeToJavaAudioProcessingComponentState(
+-    JNIEnv* jni, const AudioProcessingComponentState& state) {
++static jni_zero::ScopedJavaLocalRef<jobject>
++NativeToJavaAudioProcessingComponentState(
++    JNIEnv* jni,
++    const AudioProcessingComponentState& state) {
+   jni_zero::ScopedJavaLocalRef<jobject> requested;
+   if (state.requested_enabled.has_value()) {
+     requested = Java_AudioProcessingComponentOptions_Constructor(
+         jni, *state.requested_enabled,
+         Java_AudioProcessingMode_fromNativeIndex(
+-            jni, static_cast<jint>(state.requested_mode.value_or(AudioProcessingMode::kAutomatic))));
++            jni, static_cast<jint>(state.requested_mode.value_or(
++                     AudioProcessingMode::kAutomatic))));
+   }
+   return Java_AudioProcessingComponentState_Constructor(
+-      jni, requested, state.software_resolved.value_or(false), state.software_active.value_or(false),
+-      state.platform_available, state.platform_resolved.value_or(false), state.platform_active.value_or(false),
+-      Java_AudioProcessingImplementation_fromNativeIndex(jni, static_cast<jint>(state.effective)));
++      jni, requested, state.software_resolved.value_or(false),
++      state.software_active.value_or(false), state.platform_available,
++      state.platform_resolved.value_or(false),
++      state.platform_active.value_or(false),
++      Java_AudioProcessingImplementation_fromNativeIndex(
++          jni, static_cast<jint>(state.effective)));
+ }
+ 
+ static jni_zero::ScopedJavaLocalRef<jobject>
+-JNI_PeerConnectionFactory_GetAudioProcessingState(JNIEnv* jni, jlong native_factory) {
+-  const AudioProcessingState state = PeerConnectionFactoryFromJava(native_factory)->GetAudioProcessingState();
++JNI_PeerConnectionFactory_GetAudioProcessingState(JNIEnv* jni,
++                                                  jlong native_factory) {
++  const AudioProcessingState state =
++      PeerConnectionFactoryFromJava(native_factory)->GetAudioProcessingState();
+   return Java_AudioProcessingState_Constructor(
+       jni, state.has_audio_processing_module,
+       NativeToJavaAudioProcessingComponentState(jni, state.echo_cancellation),
+@@ -504,6 +521,49 @@ JNI_PeerConnectionFactory_GetAudioProcessingState(JNIEnv* jni, jlong native_fact
+       NativeToJavaAudioProcessingComponentState(jni, state.high_pass_filter));
+ }
+ 
++static jint JNI_PeerConnectionFactory_AcquireAudioRecording(
++    JNIEnv* jni,
++    jlong native_factory) {
++  OwnedFactoryAndThreads* owned_factory = OwnedFactoryFromJava(native_factory);
++  scoped_refptr<AudioDeviceModule> adm = owned_factory->audio_device_module();
++  if (!adm) {
++    return -1;
++  }
++  return owned_factory->worker_thread()->BlockingCall(
++      [adm = std::move(adm)] { return adm->AcquireExternalRecording(); });
++}
++
++static jint JNI_PeerConnectionFactory_ReleaseAudioRecording(
++    JNIEnv* jni,
++    jlong native_factory) {
++  OwnedFactoryAndThreads* owned_factory = OwnedFactoryFromJava(native_factory);
++  scoped_refptr<AudioDeviceModule> adm = owned_factory->audio_device_module();
++  if (!adm) {
++    return -1;
++  }
++  return owned_factory->worker_thread()->BlockingCall(
++      [adm = std::move(adm)] { return adm->ReleaseExternalRecording(); });
++}
++
++static jint JNI_PeerConnectionFactory_GetAudioRecordingState(
++    JNIEnv* jni,
++    jlong native_factory) {
++  OwnedFactoryAndThreads* owned_factory = OwnedFactoryFromJava(native_factory);
++  scoped_refptr<AudioDeviceModule> adm = owned_factory->audio_device_module();
++  if (!adm) {
++    return 0;
++  }
++  return owned_factory->worker_thread()->BlockingCall([adm = std::move(adm)] {
++    constexpr int kAvailable = 1;
++    constexpr int kInitialized = 2;
++    constexpr int kRecording = 4;
++    constexpr int kExternalDemand = 8;
++    return kAvailable | (adm->RecordingIsInitialized() ? kInitialized : 0) |
++           (adm->Recording() ? kRecording : 0) |
++           (adm->ExternalRecordingDemand() ? kExternalDemand : 0);
++  });
++}
++
+ static jlong JNI_PeerConnectionFactory_CreatePeerConnection(
+     JNIEnv* jni,
+     jlong factory,
 diff --git a/sdk/objc/api/peerconnection/RTCAudioDeviceModule.h b/sdk/objc/api/peerconnection/RTCAudioDeviceModule.h
 index d46db26c23..2bf310a2bb 100644
 --- a/sdk/objc/api/peerconnection/RTCAudioDeviceModule.h

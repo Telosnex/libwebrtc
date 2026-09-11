@@ -136,29 +136,14 @@ int32_t AudioDeviceImpl::SpeakerVolume(uint32_t& volume) {
 int32_t AudioDeviceImpl::AcquireRecording() {
   return worker_thread_->BlockingCall([&] {
     RTC_DCHECK_RUN_ON(worker_thread_);
-    int32_t result = audio_device_module_->SetExternalRecordingDemand(true);
-    if (result == 0 && !audio_device_module_->RecordingIsInitialized()) {
-      result = audio_device_module_->InitRecording();
-    }
-    if (result == 0 && !audio_device_module_->Recording()) {
-      result = audio_device_module_->StartRecording();
-    }
-    if (result != 0) {
-      audio_device_module_->SetExternalRecordingDemand(false);
-    }
-    return result;
+    return audio_device_module_->AcquireExternalRecording();
   });
 }
 
 int32_t AudioDeviceImpl::ReleaseRecording() {
   return worker_thread_->BlockingCall([&] {
     RTC_DCHECK_RUN_ON(worker_thread_);
-    int32_t demand_result =
-        audio_device_module_->SetExternalRecordingDemand(false);
-    int32_t stop_result = audio_device_module_->Recording()
-                              ? audio_device_module_->StopRecording()
-                              : 0;
-    return demand_result != 0 ? demand_result : stop_result;
+    return audio_device_module_->ReleaseExternalRecording();
   });
 }
 
