@@ -185,7 +185,7 @@ scoped_refptr<RTCAudioDevice> RTCPeerConnectionFactoryImpl::GetAudioDevice() {
   if (!audio_device_impl_)
     audio_device_impl_ =
         scoped_refptr<AudioDeviceImpl>(new RefCountedObject<AudioDeviceImpl>(
-            audio_device_module_, worker_thread_.get()));
+            audio_device_module_, worker_thread_.get(), audio_transport_factory_));
 
   return audio_device_impl_;
 }

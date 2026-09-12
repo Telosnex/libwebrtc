@@ -2,6 +2,9 @@
 #define LIB_WEBRTC_RTC_AUDIO_DEVICE_HXX
 
 #include "rtc_types.h"
+#include <cstddef>
+#include <cstdint>
+#define LIBWEBRTC_PCM_PLAYOUT_V1 1
 
 namespace libwebrtc {
 
@@ -21,6 +24,26 @@ class RTCAudioDevice : public RefCountInterface {
   };
 
  public:
+  struct PcmPlayoutState {
+    int64_t generation = 0;
+    int64_t epoch = 0;
+    int64_t queued_frames = 0;
+    int64_t accepted_frames = 0;
+    int64_t consumed_frames = 0;
+    int64_t discarded_frames = 0;
+    int64_t render_callbacks = 0;
+    int64_t underrun_callbacks = 0;
+    bool playing = false;
+    int delay_ms = -1; // ADM estimate, NOT hardware-played acknowledgement.
+  };
+  // V1: PCM16 little-endian, mono 24000 Hz, max 1s/write, max 5s backlog.
+  // One owner per factory. Positive Start result is its generation.
+  virtual int64_t StartPcmPlayout() = 0;
+  virtual int WritePcmPlayout(int64_t generation, int64_t epoch, const uint8_t* bytes, size_t size) = 0;
+  virtual int ClearPcmPlayout(int64_t generation, int64_t epoch) = 0;
+  virtual int StopPcmPlayout(int64_t generation) = 0;
+  virtual PcmPlayoutState GetPcmPlayoutState() = 0;
+
   static const int kAdmMaxDeviceNameSize = 128;
   static const int kAdmMaxFileNameSize = 512;
   static const int kAdmMaxGuidSize = 128;

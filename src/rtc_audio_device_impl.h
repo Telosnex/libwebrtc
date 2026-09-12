@@ -9,17 +9,24 @@
 #include "rtc_base/ref_count.h"
 #include "rtc_base/thread.h"
 
+namespace webrtc { class CustomAudioTransportFactory; }
 namespace libwebrtc {
 class AudioDeviceImpl : public RTCAudioDevice,
                         public webrtc::AudioDeviceObserver {
  public:
   AudioDeviceImpl(
       webrtc::scoped_refptr<webrtc::AudioDeviceModule> audio_device_module,
-      webrtc::Thread* worker_thread);
+      webrtc::Thread* worker_thread,
+      webrtc::scoped_refptr<webrtc::CustomAudioTransportFactory> transport);
 
   virtual ~AudioDeviceImpl();
 
  public:
+  int64_t StartPcmPlayout() override;
+  int WritePcmPlayout(int64_t generation, int64_t epoch, const uint8_t* bytes, size_t size) override;
+  int ClearPcmPlayout(int64_t generation, int64_t epoch) override;
+  int StopPcmPlayout(int64_t generation) override;
+  PcmPlayoutState GetPcmPlayoutState() override;
   int16_t PlayoutDevices() override;
 
   int16_t RecordingDevices() override;
@@ -58,6 +65,7 @@ class AudioDeviceImpl : public RTCAudioDevice,
 
  private:
   webrtc::scoped_refptr<webrtc::AudioDeviceModule> audio_device_module_;
+  webrtc::scoped_refptr<webrtc::CustomAudioTransportFactory> transport_;
   webrtc::Thread* worker_thread_ = nullptr;
   OnDeviceChangeCallback listener_ = nullptr;
   std::string selected_playout_device_id_;

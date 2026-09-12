@@ -30,14 +30,14 @@ if (rtc_include_tests && is_linux) {
     testonly = true
     include_dirs = [ "." ]
     sources = [
-      "src/internal/session_tap.cc",
-      "src/internal/session_tap.h",
       "src/internal/drift_servo.cc",
       "src/internal/drift_servo.h",
       "src/internal/hardware_clock_estimator.cc",
       "src/internal/hardware_clock_estimator.h",
       "src/internal/self_echo_gate.cc",
       "src/internal/self_echo_gate.h",
+      "src/internal/session_tap.cc",
+      "src/internal/session_tap.h",
       "test/aec_guarantees/tsnx_replay.cc",
     ]
     deps = [
@@ -74,6 +74,9 @@ if (rtc_include_tests && is_linux) {
       "include",
     ]
     sources = [
+      "src/internal/audio_clock_correction.cc",
+      "src/internal/audio_clock_correction.h",
+      "src/internal/capture_clock_policy.h",
       "src/internal/drift_servo.cc",
       "src/internal/drift_servo.h",
       "src/internal/hardware_clock_estimator.cc",
@@ -84,9 +87,6 @@ if (rtc_include_tests && is_linux) {
       "src/internal/session_tap.h",
       "test/aec_guarantees/aec_guarantees.test.cc",
       "test/aec_guarantees/drift_pacing.test.cc",
-      "src/internal/audio_clock_correction.cc",
-      "src/internal/audio_clock_correction.h",
-      "src/internal/capture_clock_policy.h",
     ]
     deps = [
       "//common_audio",
@@ -107,9 +107,9 @@ if (rtc_include_tests && is_mac) {
       "//api:make_ref_counted",
       "//api:scoped_refptr",
       "//api/audio:audio_device",
-      "//sdk:base_objc",
       "//modules/audio_device:mock_audio_device",
       "//rtc_base:threading",
+      "//sdk:base_objc",
       "//sdk:peerconnectionfactory_base_objc",
       "//test:test_main",
       "//test:test_support",
@@ -118,6 +118,50 @@ if (rtc_include_tests && is_mac) {
 }
 
 if (rtc_include_tests) {
+  rtc_test("pcm_factory_unittests") {
+    testonly = true
+    sources = [ "test/pcm_factory.test.cc" ]
+    deps = [
+      "//api:create_peerconnection_factory",
+      "//api:make_ref_counted",
+      "//api/audio_codecs:builtin_audio_decoder_factory",
+      "//api/audio_codecs:builtin_audio_encoder_factory",
+      "//modules/audio_device:mock_audio_device",
+      "//modules/audio_processing:mocks",
+      "//rtc_base:threading",
+      "//test:test_main",
+      "//test:test_support",
+    ]
+  }
+
+  rtc_executable("pcm_playout_smoke") {
+    testonly = true
+    sources = [ "test/pcm_playout_smoke.cc" ]
+    deps = [ ":libwebrtc" ]
+  }
+
+  rtc_test("pcm_playout_unittests") {
+    testonly = true
+    include_dirs = [
+      ".",
+      "include",
+    ]
+    sources = [ "test/pcm_playout.test.cc" ]
+    deps = [
+      ":pcm_playout_source",
+      "//api:make_ref_counted",
+      "//audio",
+      "//call:mock_call_interfaces",
+      "//common_audio",
+      "//modules/audio_device:mock_audio_device",
+      "//modules/audio_mixer:audio_mixer_impl",
+      "//modules/audio_processing:mocks",
+      "//test:test_main",
+      "//test:test_support",
+      "//test/time_controller",
+    ]
+  }
+
   rtc_executable("capture_clock_policy_test") {
     testonly = true
     include_dirs = [ "." ]
@@ -127,14 +171,15 @@ if (rtc_include_tests) {
     ]
     deps = []
   }
+
   rtc_test("libwebrtc_cpp_api_unittests") {
     testonly = true
     sources = [ "test/peerconnection_factory.test.cc" ]
     deps = [
       ":libwebrtc",
-      "//testing/gtest",
       "//test:test_main",
       "//test:test_support",
+      "//testing/gtest",
     ]
   }
 
@@ -159,6 +204,30 @@ config("external_config") {
   if (is_win) {
     defines = [ "LIB_WEBRTC_API_DLL" ]
   }
+}
+
+rtc_library("pcm_playout_source") {
+  include_dirs = [
+    ".",
+    "include",
+  ]
+  sources = [
+    "src/internal/pcm_playout_source.cc",
+    "src/internal/pcm_playout_source.h",
+  ]
+  public_configs = [ ":pcm_includes" ]
+  deps = [
+    "//api/audio:audio_mixer_api",
+    "//common_audio",
+    "//rtc_base/synchronization:mutex",
+  ]
+}
+
+config("pcm_includes") {
+  include_dirs = [
+    ".",
+    "include",
+  ]
 }
 
 rtc_shared_library("libwebrtc") {
@@ -196,10 +265,11 @@ rtc_shared_library("libwebrtc") {
     "include/base/refcount.h",
     "include/base/refcountedobject.h",
     "include/base/scoped_ref_ptr.h",
+    "include/helper.h",
     "include/libwebrtc.h",
+    "include/rtc_audio_clock_correction.h",
     "include/rtc_audio_device.h",
     "include/rtc_audio_processing.h",
-    "include/rtc_audio_clock_correction.h",
     "include/rtc_audio_source.h",
     "include/rtc_audio_track.h",
     "include/rtc_data_channel.h",
@@ -208,6 +278,7 @@ rtc_shared_library("libwebrtc") {
     "include/rtc_dtmf_sender.h",
     "include/rtc_frame_cryptor.h",
     "include/rtc_ice_candidate.h",
+    "include/rtc_logging.h",
     "include/rtc_media_stream.h",
     "include/rtc_media_track.h",
     "include/rtc_mediaconstraints.h",
@@ -225,25 +296,23 @@ rtc_shared_library("libwebrtc") {
     "include/rtc_video_renderer.h",
     "include/rtc_video_source.h",
     "include/rtc_video_track.h",
-    "include/rtc_logging.h",
-    "include/helper.h",
-    "src/helper.cc",
     "src/base/portable.cc",
-    "src/internal/session_tap.cc",
-    "src/internal/session_tap.h",
-    "src/internal/drift_servo.cc",
-    "src/internal/drift_servo.h",
-    "src/internal/hardware_clock_estimator.cc",
-    "src/internal/hardware_clock_estimator.h",
-    "src/internal/self_echo_gate.cc",
-    "src/internal/self_echo_gate.h",
+    "src/helper.cc",
     "src/internal/audio_clock_correction.cc",
     "src/internal/audio_clock_correction.h",
     "src/internal/capture_clock_policy.h",
     "src/internal/custom_audio_transport_impl.cc",
     "src/internal/custom_audio_transport_impl.h",
+    "src/internal/drift_servo.cc",
+    "src/internal/drift_servo.h",
+    "src/internal/hardware_clock_estimator.cc",
+    "src/internal/hardware_clock_estimator.h",
     "src/internal/local_audio_track.cc",
     "src/internal/local_audio_track.h",
+    "src/internal/self_echo_gate.cc",
+    "src/internal/self_echo_gate.h",
+    "src/internal/session_tap.cc",
+    "src/internal/session_tap.h",
     "src/internal/vcm_capturer.cc",
     "src/internal/vcm_capturer.h",
     "src/internal/video_capturer.cc",
@@ -257,10 +326,10 @@ rtc_shared_library("libwebrtc") {
     "src/rtc_audio_source_impl.h",
     "src/rtc_audio_track_impl.cc",
     "src/rtc_audio_track_impl.h",
-    "src/rtc_data_packet_cryptor_impl.cc",
-    "src/rtc_data_packet_cryptor_impl.h",
     "src/rtc_data_channel_impl.cc",
     "src/rtc_data_channel_impl.h",
+    "src/rtc_data_packet_cryptor_impl.cc",
+    "src/rtc_data_packet_cryptor_impl.h",
     "src/rtc_dtls_transport_impl.cc",
     "src/rtc_dtls_transport_impl.h",
     "src/rtc_dtmf_sender_impl.cc",
@@ -269,6 +338,7 @@ rtc_shared_library("libwebrtc") {
     "src/rtc_frame_cryptor_impl.h",
     "src/rtc_ice_candidate_impl.cc",
     "src/rtc_ice_candidate_impl.h",
+    "src/rtc_logging.cc",
     "src/rtc_media_stream_impl.cc",
     "src/rtc_media_stream_impl.h",
     "src/rtc_mediaconstraints_impl.cc",
@@ -299,7 +369,6 @@ rtc_shared_library("libwebrtc") {
     "src/rtc_video_source_impl.h",
     "src/rtc_video_track_impl.cc",
     "src/rtc_video_track_impl.h",
-    "src/rtc_logging.cc",
   ]
 
   # intel media sdk
@@ -362,6 +431,7 @@ rtc_shared_library("libwebrtc") {
   }
 
   deps = [
+    ":pcm_playout_source",
     "../api:create_peerconnection_factory",
     "../api:libjingle_peerconnection_api",
     "../api/audio_codecs:builtin_audio_decoder_factory",
@@ -374,15 +444,15 @@ rtc_shared_library("libwebrtc") {
     "../media:rtc_internal_video_codecs",
     "../media:rtc_media",
     "../media:rtc_media_base",
-    "../modules/audio_device:audio_device",
+    "../modules/audio_device",
+    "../modules/audio_processing",
     "../modules/audio_processing:api",
-    "../modules/audio_processing:audio_processing",
     "../modules/video_capture:video_capture_module",
     "../pc:libjingle_peerconnection",
     "../rtc_base:threading",
     "../sdk:media_constraints",
     "//third_party/abseil-cpp/absl/memory",
-    "//third_party/boringssl:boringssl",
+    "//third_party/boringssl",
     "//third_party/libyuv",
   ]
 
@@ -393,8 +463,8 @@ rtc_shared_library("libwebrtc") {
       "include/rtc_desktop_capturer.h",
       "include/rtc_desktop_device.h",
       "include/rtc_desktop_media_list.h",
-      "src/internal/desktop_capturer.h",
       "src/internal/desktop_capturer.cc",
+      "src/internal/desktop_capturer.h",
       "src/internal/jpeg_util.cc",
       "src/internal/jpeg_util.h",
       "src/rtc_desktop_capturer_impl.cc",
@@ -404,16 +474,12 @@ rtc_shared_library("libwebrtc") {
       "src/rtc_desktop_media_list_impl.cc",
       "src/rtc_desktop_media_list_impl.h",
     ]
-    deps += [
-      "../modules/desktop_capture",
-    ]
+    deps += [ "../modules/desktop_capture" ]
     if (is_linux) {
       configs += [ ":gio" ]
     }
-    if(is_mac || is_win || is_linux) {
-      deps += [
-        "//third_party/libjpeg_turbo:libjpeg",
-      ]
+    if (is_mac || is_win || is_linux) {
+      deps += [ "//third_party/libjpeg_turbo:libjpeg" ]
     }
   }
 }

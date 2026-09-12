@@ -107,6 +107,8 @@ cd src
 git apply "libwebrtc/patches/tsnx_hardware_clock_api.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 git apply "libwebrtc/patches/custom_audio_source_m144.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 git apply "libwebrtc/patches/external_recording_demand.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
+git apply "libwebrtc/patches/external_pcm_playout.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
+git apply "libwebrtc/patches/pcm_playout_sdk.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 git apply "libwebrtc/patches/add_libwebrtc_build_target.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 git apply "libwebrtc/patches/fix_desktop_capture_compile.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 git apply "libwebrtc/patches/tsnx_alsa_capture_depth.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
@@ -157,7 +159,7 @@ gn gen "$OUTPUT_DIR" --root="src" --args="${args}"
 ninja -C "$OUTPUT_DIR" \
   libwebrtc \
   libwebrtc_cpp_api_unittests \
-  external_recording_demand_unittests \
+  external_recording_demand_unittests pcm_playout_unittests pcm_factory_unittests pcm_playout_smoke \
   capture_clock_policy_test \
   tsnx_aec_guarantees_unittests \
   tsnx_replay \
@@ -168,6 +170,8 @@ if [ "$arch" = "x64" ]; then
     cd "$OUTPUT_DIR"
     LD_LIBRARY_PATH=. ./libwebrtc_cpp_api_unittests \
       --gtest_filter='AudioProcessing.*:AudioDevice.RecordingStateReadbackHasNoCaptureSideEffect:AudioDevice.ActivePlayoutRouteReadbackIsGraceful'
+    ./pcm_factory_unittests
+    ./pcm_playout_unittests
     ./external_recording_demand_unittests
     ./capture_clock_policy_test
     ./tsnx_aec_guarantees_unittests
@@ -183,7 +187,7 @@ fi
 TESTS_DIR="$COMMAND_DIR/linux-$arch-$profile-tests"
 mkdir -p "$TESTS_DIR"
 for name in libwebrtc.so libwebrtc_cpp_api_unittests \
-    external_recording_demand_unittests capture_clock_policy_test \
+    external_recording_demand_unittests pcm_playout_unittests pcm_factory_unittests pcm_playout_smoke capture_clock_policy_test \
     tsnx_aec_guarantees_unittests tsnx_replay tsnx_alsa_hw_clock_probe; do
   cp "$OUTPUT_DIR/$name" "$TESTS_DIR/"
 done
@@ -191,7 +195,7 @@ cp "$COMMAND_DIR/../test/aec_guarantees/smoke_replay.py" "$TESTS_DIR/"
 (
   cd "$TESTS_DIR"
   sha256sum libwebrtc.so libwebrtc_cpp_api_unittests \
-    external_recording_demand_unittests capture_clock_policy_test \
+    external_recording_demand_unittests pcm_playout_unittests pcm_factory_unittests pcm_playout_smoke capture_clock_policy_test \
     tsnx_aec_guarantees_unittests tsnx_replay tsnx_alsa_hw_clock_probe \
     smoke_replay.py > SHA256SUMS
 )

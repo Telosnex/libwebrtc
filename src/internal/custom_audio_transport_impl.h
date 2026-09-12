@@ -17,6 +17,7 @@
 #include "src/internal/audio_clock_correction.h"
 #include "src/internal/self_echo_gate.h"
 #include "src/internal/session_tap.h"
+#include "src/internal/pcm_playout_source.h"
 
 namespace webrtc {
 
@@ -99,6 +100,12 @@ class CustomAudioTransportFactory : public AudioTransportFactory {
       std::shared_ptr<libwebrtc::AudioClockCorrection> clock_correction)
       : clock_correction_(std::move(clock_correction)) {}
   ~CustomAudioTransportFactory() = default;
+  void OnAudioStateChanged(AudioState* state) override {
+    audio_state_ = state;
+    if (!state) pcm_source_.Stop();
+  }
+  AudioState* audio_state() const { return audio_state_; }
+  libwebrtc::PcmPlayoutSource& pcm_source() { return pcm_source_; }
   std::unique_ptr<AudioTransport> Create(
       webrtc::AudioMixer* mixer, webrtc::AudioProcessing* audio_processing,
       webrtc::AsyncAudioProcessing::Factory* async_audio_processing_factory)
@@ -119,6 +126,8 @@ class CustomAudioTransportFactory : public AudioTransportFactory {
  private:
   const std::shared_ptr<libwebrtc::AudioClockCorrection> clock_correction_;
   CustomAudioTransportImpl* audio_transport_impl_ = nullptr;
+  AudioState* audio_state_ = nullptr;
+  libwebrtc::PcmPlayoutSource pcm_source_;
 };
 
 }  // namespace webrtc

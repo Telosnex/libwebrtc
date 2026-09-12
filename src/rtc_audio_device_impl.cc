@@ -1,4 +1,5 @@
 #include "rtc_audio_device_impl.h"
+#include "src/internal/custom_audio_transport_impl.h"
 
 #include <cstring>
 #include <string>
@@ -9,13 +10,59 @@ namespace libwebrtc {
 
 AudioDeviceImpl::AudioDeviceImpl(
     webrtc::scoped_refptr<webrtc::AudioDeviceModule> audio_device_module,
-    webrtc::Thread* worker_thread)
-    : audio_device_module_(audio_device_module), worker_thread_(worker_thread) {
+    webrtc::Thread* worker_thread,
+    webrtc::scoped_refptr<webrtc::CustomAudioTransportFactory> transport)
+    : audio_device_module_(audio_device_module), transport_(std::move(transport)), worker_thread_(worker_thread) {
   audio_device_module_->SetObserver(this);
 }
 
 AudioDeviceImpl::~AudioDeviceImpl() {
   RTC_LOG(LS_INFO) << __FUNCTION__ << ": dtor ";
+}
+
+int64_t AudioDeviceImpl::StartPcmPlayout() {
+  return worker_thread_->BlockingCall([&]() -> int64_t {
+    if (!transport_ || !transport_->audio_state()) return -1;
+    auto& source = transport_->pcm_source();
+    const int64_t generation = source.Start();
+    if (generation <= 0) return generation;
+    if (transport_->audio_state()->AddExternalPlayoutSource(&source) != 0) {
+      source.Stop();
+      return -1;
+    }
+    return generation;
+  });
+}
+int AudioDeviceImpl::WritePcmPlayout(int64_t generation, int64_t epoch, const uint8_t* bytes, size_t size) {
+  return worker_thread_->BlockingCall([&] {
+    return transport_->pcm_source().Write(generation, epoch, bytes, size);
+  });
+}
+int AudioDeviceImpl::ClearPcmPlayout(int64_t generation, int64_t epoch) {
+  return worker_thread_->BlockingCall([&] {
+    return transport_->pcm_source().Clear(generation, epoch);
+  });
+}
+int AudioDeviceImpl::StopPcmPlayout(int64_t generation) {
+  return worker_thread_->BlockingCall([&] {
+    auto& source = transport_->pcm_source();
+    const auto state = source.State();
+    if (generation <= 0 || state.generation != generation) return -2;
+    // Silence immediately, but retain owner on ADM stop failure for retry.
+    if (source.Quiesce(generation) != 0) return -2;
+    if (!transport_->audio_state() || transport_->audio_state()->RemoveExternalPlayoutSource(&source) != 0) return -1;
+    source.Stop();
+    return 0;
+  });
+}
+RTCAudioDevice::PcmPlayoutState AudioDeviceImpl::GetPcmPlayoutState() {
+  return worker_thread_->BlockingCall([&] {
+    auto state = transport_->pcm_source().State();
+    state.playing = audio_device_module_->Playing();
+    uint16_t delay = 0;
+    if (audio_device_module_->PlayoutDelay(&delay) == 0) state.delay_ms = delay;
+    return state;
+  });
 }
 
 int16_t AudioDeviceImpl::PlayoutDevices() {

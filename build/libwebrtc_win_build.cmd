@@ -101,6 +101,8 @@ copy .vpython3 ..
 call git apply "libwebrtc\patches\tsnx_hardware_clock_api.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn || exit /b 1
 call git apply "libwebrtc\patches\custom_audio_source_m144.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn || exit /b 1
 call git apply "libwebrtc\patches\external_recording_demand.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn || exit /b 1
+call git apply "libwebrtc\patches\external_pcm_playout.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn || exit /b 1
+call git apply "libwebrtc\patches\pcm_playout_sdk.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn || exit /b 1
 call git apply "libwebrtc\patches\add_libwebrtc_build_target.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn || exit /b 1
 cd ..
 
@@ -123,7 +125,7 @@ call gn.bat gen %OUTPUT_DIR% --root="src" ^
 if errorlevel 1 exit /b 1
 
 rem Build the artifact and its focused wrapper/core ownership tests.
-ninja.exe -C %OUTPUT_DIR% libwebrtc libwebrtc_cpp_api_unittests external_recording_demand_unittests
+ninja.exe -C %OUTPUT_DIR% libwebrtc libwebrtc_cpp_api_unittests external_recording_demand_unittests pcm_playout_unittests pcm_factory_unittests
 
 if errorlevel 1 exit /b 1
 
@@ -131,6 +133,10 @@ if "!arch!" == "x64" (
   %OUTPUT_DIR%\libwebrtc_cpp_api_unittests.exe --gtest_filter=AudioProcessing.*:AudioDevice.RecordingStateReadbackHasNoCaptureSideEffect:AudioDevice.ActivePlayoutRouteReadbackIsGraceful
   if errorlevel 1 exit /b 1
 
+  %OUTPUT_DIR%\pcm_playout_unittests.exe
+  if errorlevel 1 exit /b 1
+  %OUTPUT_DIR%\pcm_factory_unittests.exe
+  if errorlevel 1 exit /b 1
   %OUTPUT_DIR%\external_recording_demand_unittests.exe
   if errorlevel 1 exit /b 1
 ) else (
@@ -140,7 +146,7 @@ if "!arch!" == "x64" (
 rem Retain same-build tests for x64 and ARM64 qualification without devices.
 set "TESTS_DIR=%cd%\win-!arch!-!profile!-tests"
 if not exist "!TESTS_DIR!" mkdir "!TESTS_DIR!"
-for %%F in (libwebrtc.dll libwebrtc_cpp_api_unittests.exe external_recording_demand_unittests.exe) do (
+for %%F in (libwebrtc.dll libwebrtc_cpp_api_unittests.exe external_recording_demand_unittests.exe pcm_playout_unittests.exe pcm_factory_unittests.exe) do (
   copy /Y "%OUTPUT_DIR%\%%F" "!TESTS_DIR!\" >nul
   if errorlevel 1 exit /b 1
 )

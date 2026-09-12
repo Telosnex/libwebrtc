@@ -1,0 +1,156 @@
+diff --git a/call/audio_state.h b/call/audio_state.h
+--- a/call/audio_state.h
++++ b/call/audio_state.h
+@@ -46,6 +46,12 @@
+     scoped_refptr<webrtc::AudioTransportFactory> audio_transport_factory;
+   };
+ 
++  // Worker-owned external playout, using the same mixer/APM/ADM as RTP.
++  // Add starts ADM even with no receiving stream. Remove never stops an ADM
++  // still used by receivers. Caller must retain source until removal succeeds.
++  virtual int AddExternalPlayoutSource(AudioMixer::Source*) { return -1; }
++  virtual int RemoveExternalPlayoutSource(AudioMixer::Source*) { return -1; }
++
+   virtual AudioProcessing* audio_processing() = 0;
+   virtual AudioTransport* audio_transport() = 0;
+ 
+diff --git a/audio/audio_state.h b/audio/audio_state.h
+--- a/audio/audio_state.h
++++ b/audio/audio_state.h
+@@ -45,6 +45,8 @@
+   AudioProcessing* audio_processing() override;
+   AudioTransport* audio_transport() override;
+ 
++  int AddExternalPlayoutSource(AudioMixer::Source* source) override;
++  int RemoveExternalPlayoutSource(AudioMixer::Source* source) override;
+   void SetPlayout(bool enabled) override;
+   void SetRecording(bool enabled) override;
+ 
+@@ -72,6 +74,7 @@
+   RTC_NO_UNIQUE_ADDRESS SequenceChecker process_thread_checker_{
+       SequenceChecker::kDetached};
+   const webrtc::AudioState::Config config_;
++  webrtc::flat_set<AudioMixer::Source*> external_playout_sources_;
+   bool recording_enabled_ = true;
+   bool playout_enabled_ = true;
+ 
+diff --git a/audio/audio_state.cc b/audio/audio_state.cc
+--- a/audio/audio_state.cc
++++ b/audio/audio_state.cc
+@@ -49,6 +49,8 @@
+                     config_.async_audio_processing_factory.get())) {
+   RTC_DCHECK(config_.audio_mixer);
+   RTC_DCHECK(config_.audio_device_module);
++  if (config_.audio_transport_factory)
++    config_.audio_transport_factory->OnAudioStateChanged(this);
+ }
+ 
+ AudioState::~AudioState() {
+@@ -56,6 +58,15 @@
+   RTC_DCHECK(receiving_streams_.empty());
+   RTC_DCHECK(sending_streams_.empty());
+   RTC_DCHECK(!null_audio_poller_.Running());
++  // Detach the externally-owned sources before notifying their owner. Mixer
++  // removal synchronizes with the render callback, preventing use-after-free.
++  if (playout_enabled_) {
++    for (auto* source : external_playout_sources_)
++      config_.audio_mixer->RemoveSource(source);
++  }
++  if (!external_playout_sources_.empty()) config_.audio_device_module->StopPlayout();
++  if (config_.audio_transport_factory)
++    config_.audio_transport_factory->OnAudioStateChanged(nullptr);
+ }
+ 
+ AudioProcessing* AudioState::audio_processing() {
+@@ -66,12 +77,45 @@
+   return audio_transport_.get();
+ }
+ 
++int AudioState::AddExternalPlayoutSource(AudioMixer::Source* source) {
++  RTC_DCHECK_RUN_ON(&thread_checker_);
++  if (!source || !playout_enabled_ || external_playout_sources_.count(source)) return -1;
++  // NullAudioPoller must never be a second consumer of app PCM.
++  RTC_DCHECK(!null_audio_poller_.Running());
++  auto* adm = config_.audio_device_module.get();
++  if (!adm->Playing() && adm->InitPlayout() != 0) return -1;
++  if (!config_.audio_mixer->AddSource(source)) return -1;
++  if (!adm->Playing() && adm->StartPlayout() != 0) {
++    config_.audio_mixer->RemoveSource(source);
++    return -1;
++  }
++  external_playout_sources_.insert(source);
++  return 0;
++}
++
++int AudioState::RemoveExternalPlayoutSource(AudioMixer::Source* source) {
++  RTC_DCHECK_RUN_ON(&thread_checker_);
++  if (!external_playout_sources_.count(source)) return -1;
++  // Stop first: on failure preserve ownership for retry (caller clears PCM).
++  if (external_playout_sources_.size() == 1 && receiving_streams_.empty() &&
++      config_.audio_device_module->Playing() &&
++      config_.audio_device_module->StopPlayout() != 0) return -1;
++  if (playout_enabled_) config_.audio_mixer->RemoveSource(source);
++  external_playout_sources_.erase(source);
++  return 0;
++}
++
+ void AudioState::SetPlayout(bool enabled) {
+   RTC_LOG(LS_INFO) << "SetPlayout(" << enabled << ")";
+   RTC_DCHECK_RUN_ON(&thread_checker_);
+   auto* adm = config_.audio_device_module.get();
+   if (enabled) {
+-    if (!receiving_streams_.empty()) {
++    null_audio_poller_.Stop();
++    if (!playout_enabled_) {
++      for (auto* source : external_playout_sources_)
++        config_.audio_mixer->AddSource(source);
++    }
++    if (!receiving_streams_.empty() || !external_playout_sources_.empty()) {
+       if (!adm->Playing()) {
+         if (adm->InitPlayout() == 0) {
+           adm->StartPlayout();
+@@ -80,7 +124,12 @@
+     }
+   } else {
+     // Disable playout.
+-    config_.audio_device_module->StopPlayout();
++    if (config_.audio_device_module->StopPlayout() != 0) return;
++    // Global playout disable suspends app PCM; the silent poller must not eat it.
++    if (playout_enabled_) {
++      for (auto* source : external_playout_sources_)
++        config_.audio_mixer->RemoveSource(source);
++    }
+   }
+   playout_enabled_ = enabled;
+   UpdateNullAudioPollerState();
+@@ -115,7 +164,7 @@
+   auto count = receiving_streams_.erase(stream);
+   RTC_DCHECK_EQ(1, count);
+   config_.audio_mixer->RemoveSource(stream->source());
+-  if (receiving_streams_.empty()) {
++  if (receiving_streams_.empty() && external_playout_sources_.empty()) {
+     config_.audio_device_module->StopPlayout();
+   }
+   UpdateNullAudioPollerState();
+diff --git a/audio/audio_transport_impl.h b/audio/audio_transport_impl.h
+--- a/audio/audio_transport_impl.h
++++ b/audio/audio_transport_impl.h
+@@ -29,6 +29,7 @@
+ namespace webrtc {
+ 
+ class AudioSender;
++class AudioState;
+ 
+ class AudioTransportImpl : public AudioTransport {
+  public:
+@@ -118,6 +119,10 @@
+ 
+ class AudioTransportFactory : public RefCountInterface {
+  public:
++  // Worker-thread lifetime notification for app-owned mixer sources. Raw pointer
++  // is valid only until the matching nullptr notification, never retained by a
++  // render callback. Default keeps existing transport factories unchanged.
++  virtual void OnAudioStateChanged(AudioState* state) {}
+   virtual std::unique_ptr<AudioTransport> Create(
+       AudioMixer* mixer,
+       AudioProcessing* audio_processing,

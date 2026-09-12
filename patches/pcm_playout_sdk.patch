@@ -1,0 +1,328 @@
+diff --git a/api/peer_connection_interface.h b/api/peer_connection_interface.h
+--- a/api/peer_connection_interface.h
++++ b/api/peer_connection_interface.h
+@@ -1596,6 +1596,16 @@
+   // configured for media, or engine creation failed).
+   // Device-level platform processing detail lives on the audio device
+   // module's platform audio processing state instead.
++  // V1 app PCM16LE, mono/24kHz. Worker-thread methods; bounded source shares
++  // the RTP mixer, APM render reference and ADM. No microphone or peer needed.
++  virtual int64_t StartPcmPlayout() { return -1; }
++  virtual int WritePcmPlayout(int64_t generation, int64_t epoch, const std::vector<uint8_t>& pcm) { return -1; }
++  virtual int ClearPcmPlayout(int64_t generation, int64_t epoch) { return -1; }
++  virtual int StopPcmPlayout(int64_t generation) { return -1; }
++  // generation, epoch, queued, accepted, consumed, discarded, callbacks,
++  // underruns, playing (0/1), ADM delay_ms (-1 unknown).
++  virtual std::vector<int64_t> GetPcmPlayoutState() { return {}; }
++
+   virtual AudioProcessingState GetAudioProcessingState() {
+     return {};
+   }
+diff --git a/pc/peer_connection_factory.h b/pc/peer_connection_factory.h
+--- a/pc/peer_connection_factory.h
++++ b/pc/peer_connection_factory.h
+@@ -43,6 +43,7 @@
+ #include "rtc_base/thread.h"
+ #include "rtc_base/thread_annotations.h"
+ 
++namespace libwebrtc { class PcmPlayoutSource; }
+ namespace webrtc {
+ 
+ class PeerConnectionFactory : public PeerConnectionFactoryInterface {
+@@ -86,6 +87,11 @@
+   void StopAecDump() override;
+ 
+   AudioProcessingState GetAudioProcessingState() override;
++  int64_t StartPcmPlayout() override;
++  int WritePcmPlayout(int64_t generation, int64_t epoch, const std::vector<uint8_t>& pcm) override;
++  int ClearPcmPlayout(int64_t generation, int64_t epoch) override;
++  int StopPcmPlayout(int64_t generation) override;
++  std::vector<int64_t> GetPcmPlayoutState() override;
+ 
+   SctpTransportFactoryInterface* sctp_transport_factory() {
+     return context_->sctp_transport_factory();
+@@ -129,6 +135,8 @@
+       const Environment& env,
+       const PeerConnectionInterface::RTCConfiguration& configuration);
+ 
++  std::unique_ptr<libwebrtc::PcmPlayoutSource> pcm_source_ RTC_GUARDED_BY(worker_thread());
++  std::unique_ptr<ConnectionContext::MediaEngineReference> pcm_engine_ RTC_GUARDED_BY(worker_thread());
+   Environment env_;
+   scoped_refptr<ConnectionContext> context_;
+   PeerConnectionFactoryInterface::Options options_
+diff --git a/pc/peer_connection_factory.cc b/pc/peer_connection_factory.cc
+--- a/pc/peer_connection_factory.cc
++++ b/pc/peer_connection_factory.cc
+@@ -9,6 +9,7 @@
+  */
+ 
+ #include "pc/peer_connection_factory.h"
++#include "libwebrtc/src/internal/pcm_playout_source.h"
+ 
+ #include <cstdint>
+ #include <cstdio>
+@@ -121,6 +122,12 @@
+ PeerConnectionFactory::~PeerConnectionFactory() {
+   RTC_DCHECK_RUN_ON(signaling_thread());
+   worker_thread()->BlockingCall([this] {
++    if (pcm_engine_ && pcm_source_) {
++      pcm_source_->Quiesce(pcm_source_->State().generation);
++      pcm_engine_->media_engine()->voice().GetAudioState()->RemoveExternalPlayoutSource(pcm_source_.get(), true);
++    }
++    pcm_engine_.reset();
++    pcm_source_.reset();
+     RTC_DCHECK_RUN_ON(worker_thread());
+     decode_metronome_ = nullptr;
+     encode_metronome_ = nullptr;
+@@ -211,7 +218,58 @@
+     return;
+   media_engine_ref_->media_engine()->voice().StopAecDump();
+   media_engine_ref_ = nullptr;
++}
++
++int64_t PeerConnectionFactory::StartPcmPlayout() {
++  RTC_DCHECK_RUN_ON(worker_thread());
++  if (pcm_engine_) return -1;
++  if (!pcm_source_) pcm_source_ = std::make_unique<libwebrtc::PcmPlayoutSource>();
++  auto engine = std::make_unique<ConnectionContext::MediaEngineReference>(context_);
++  if (!engine->media_engine()) return -1;
++  auto state = engine->media_engine()->voice().GetAudioState();
++  if (!state) return -1;
++  const auto generation = pcm_source_->Start();
++  if (generation <= 0) return -1;
++  if (state->AddExternalPlayoutSource(pcm_source_.get()) != 0) {
++    pcm_source_->Stop();
++    return -1;
++  }
++  pcm_engine_ = std::move(engine);
++  return generation;
++}
++int PeerConnectionFactory::WritePcmPlayout(int64_t generation, int64_t epoch, const std::vector<uint8_t>& pcm) {
++  RTC_DCHECK_RUN_ON(worker_thread());
++  return pcm_engine_ ? pcm_source_->Write(generation, epoch, pcm.data(), pcm.size()) : -2;
++}
++int PeerConnectionFactory::ClearPcmPlayout(int64_t generation, int64_t epoch) {
++  RTC_DCHECK_RUN_ON(worker_thread());
++  return pcm_engine_ ? pcm_source_->Clear(generation, epoch) : -2;
+ }
++int PeerConnectionFactory::StopPcmPlayout(int64_t generation) {
++  RTC_DCHECK_RUN_ON(worker_thread());
++  if (!pcm_engine_ || pcm_source_->Quiesce(generation) != 0) return -2;
++  if (pcm_engine_->media_engine()->voice().GetAudioState()->RemoveExternalPlayoutSource(pcm_source_.get()) != 0) return -1;
++  pcm_source_->Stop();
++  pcm_engine_.reset();
++  return 0;
++}
++std::vector<int64_t> PeerConnectionFactory::GetPcmPlayoutState() {
++  RTC_DCHECK_RUN_ON(worker_thread());
++  const auto s = pcm_source_ ? pcm_source_->State() : libwebrtc::RTCAudioDevice::PcmPlayoutState{};
++  bool playing = false;
++  int delay = -1;
++  if (pcm_engine_) {
++    // Same ADM that the mixer drives, not a separate platform output.
++    auto* adm = pcm_engine_->media_engine()->voice().GetAudioState()->pcm_audio_device_module();
++    if (adm) {
++      playing = adm->Playing();
++      uint16_t ms = 0;
++      if (adm->PlayoutDelay(&ms) == 0) delay = ms;
++    }
++  }
++  return {s.generation, s.epoch, s.queued_frames, s.accepted_frames, s.consumed_frames,
++          s.discarded_frames, s.render_callbacks, s.underrun_callbacks, playing ? 1 : 0, delay};
++}
+ 
+ AudioProcessingState
+ PeerConnectionFactory::GetAudioProcessingState() {
+diff --git a/pc/peer_connection_factory_proxy.h b/pc/peer_connection_factory_proxy.h
+--- a/pc/peer_connection_factory_proxy.h
++++ b/pc/peer_connection_factory_proxy.h
+@@ -58,6 +58,11 @@
+ PROXY_SECONDARY_METHOD0(void, StopAecDump)
+ PROXY_SECONDARY_METHOD0(AudioProcessingState,
+                         GetAudioProcessingState)
++PROXY_SECONDARY_METHOD0(int64_t, StartPcmPlayout)
++PROXY_SECONDARY_METHOD3(int, WritePcmPlayout, int64_t, int64_t, const std::vector<uint8_t>&)
++PROXY_SECONDARY_METHOD2(int, ClearPcmPlayout, int64_t, int64_t)
++PROXY_SECONDARY_METHOD1(int, StopPcmPlayout, int64_t)
++PROXY_SECONDARY_METHOD0(std::vector<int64_t>, GetPcmPlayoutState)
+ END_PROXY_MAP(PeerConnectionFactory)
+ 
+ }  // namespace webrtc
+diff --git a/pc/BUILD.gn b/pc/BUILD.gn
+--- a/pc/BUILD.gn
++++ b/pc/BUILD.gn
+@@ -1605,6 +1605,7 @@
+     "peer_connection_factory.h",
+   ]
+   deps = [
++    "//libwebrtc:pcm_playout_source",
+     ":audio_track",
+     ":codec_vendor",
+     ":connection_context",
+diff --git a/call/audio_state.h b/call/audio_state.h
+--- a/call/audio_state.h
++++ b/call/audio_state.h
+@@ -50,8 +50,10 @@
+   // Add starts ADM even with no receiving stream. Remove never stops an ADM
+   // still used by receivers. Caller must retain source until removal succeeds.
+   virtual int AddExternalPlayoutSource(AudioMixer::Source*) { return -1; }
+-  virtual int RemoveExternalPlayoutSource(AudioMixer::Source*) { return -1; }
++  virtual int RemoveExternalPlayoutSource(AudioMixer::Source*, bool force = false) { return -1; }
+ 
++  virtual AudioDeviceModule* pcm_audio_device_module() { return nullptr; }
++
+   virtual AudioProcessing* audio_processing() = 0;
+   virtual AudioTransport* audio_transport() = 0;
+ 
+diff --git a/audio/audio_state.h b/audio/audio_state.h
+--- a/audio/audio_state.h
++++ b/audio/audio_state.h
+@@ -46,12 +46,14 @@
+   AudioTransport* audio_transport() override;
+ 
+   int AddExternalPlayoutSource(AudioMixer::Source* source) override;
+-  int RemoveExternalPlayoutSource(AudioMixer::Source* source) override;
++  int RemoveExternalPlayoutSource(AudioMixer::Source* source, bool force = false) override;
+   void SetPlayout(bool enabled) override;
+   void SetRecording(bool enabled) override;
+ 
+   void SetStereoChannelSwapping(bool enable) override;
+ 
++  AudioDeviceModule* pcm_audio_device_module() override { return config_.audio_device_module.get(); }
++
+   AudioDeviceModule* audio_device_module() {
+     RTC_DCHECK(config_.audio_device_module);
+     return config_.audio_device_module.get();
+diff --git a/audio/audio_state.cc b/audio/audio_state.cc
+--- a/audio/audio_state.cc
++++ b/audio/audio_state.cc
+@@ -93,13 +93,13 @@
+   return 0;
+ }
+ 
+-int AudioState::RemoveExternalPlayoutSource(AudioMixer::Source* source) {
++int AudioState::RemoveExternalPlayoutSource(AudioMixer::Source* source, bool force) {
+   RTC_DCHECK_RUN_ON(&thread_checker_);
+   if (!external_playout_sources_.count(source)) return -1;
+   // Stop first: on failure preserve ownership for retry (caller clears PCM).
+   if (external_playout_sources_.size() == 1 && receiving_streams_.empty() &&
+       config_.audio_device_module->Playing() &&
+-      config_.audio_device_module->StopPlayout() != 0) return -1;
++      config_.audio_device_module->StopPlayout() != 0 && !force) return -1;
+   if (playout_enabled_) config_.audio_mixer->RemoveSource(source);
+   external_playout_sources_.erase(source);
+   return 0;
+diff --git a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.h b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.h
+--- a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.h
++++ b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.h
+@@ -14,6 +14,8 @@
+ #import "RTCAudioDeviceModule.h"
+ #import "RTCAudioProcessingState.h"
+ 
++#define RTC_PCM_PLAYOUT_V1 1
++
+ NS_ASSUME_NONNULL_BEGIN
+ 
+ @class RTC_OBJC_TYPE(RTCRtpCapabilities);
+@@ -78,6 +80,11 @@
+  *  across every peer connection it creates, so this reflects the
+  *  factory-scoped processing state. */
+ @property(nonatomic, readonly) RTC_OBJC_TYPE(RTCAudioProcessingState) *audioProcessingState;
++- (int64_t)startPcmPlayout;
++- (int)writePcmPlayout:(NSData *)pcm generation:(int64_t)generation epoch:(int64_t)epoch;
++- (int)clearPcmPlayout:(int64_t)generation epoch:(int64_t)epoch;
++- (int)stopPcmPlayout:(int64_t)generation;
++- (NSDictionary<NSString *, NSNumber *> *)pcmPlayoutState;
+ 
+ /**
+  * Valid kind values are kRTCMediaStreamTrackKindAudio and
+diff --git a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
+--- a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
++++ b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
+@@ -423,6 +423,22 @@
+ 
+   webrtc::RtpCapabilities rtpCapabilities = _nativeFactory->GetRtpReceiverCapabilities(mediaType);
+   return [[RTC_OBJC_TYPE(RTCRtpCapabilities) alloc] initWithNativeRtpCapabilities:rtpCapabilities];
++}
++
++- (int64_t)startPcmPlayout { return _nativeFactory->StartPcmPlayout(); }
++- (int)writePcmPlayout:(NSData *)pcm generation:(int64_t)generation epoch:(int64_t)epoch {
++  if (pcm.length == 0 || pcm.length > 48000 || pcm.length % 2) return -3;
++  const uint8_t *bytes = static_cast<const uint8_t *>(pcm.bytes);
++  return _nativeFactory->WritePcmPlayout(generation, epoch, std::vector<uint8_t>(bytes, bytes+pcm.length));
++}
++- (int)clearPcmPlayout:(int64_t)generation epoch:(int64_t)epoch { return _nativeFactory->ClearPcmPlayout(generation,epoch); }
++- (int)stopPcmPlayout:(int64_t)generation { return _nativeFactory->StopPcmPlayout(generation); }
++- (NSDictionary<NSString *, NSNumber *> *)pcmPlayoutState {
++  const auto s = _nativeFactory->GetPcmPlayoutState();
++  if (s.size() != 10) return @{};
++  return @{ @"generation": @(s[0]), @"epoch": @(s[1]), @"queuedFrames": @(s[2]),
++    @"acceptedFrames": @(s[3]), @"consumedFrames": @(s[4]), @"discardedFrames": @(s[5]),
++    @"renderCallbacks": @(s[6]), @"underrunCallbacks": @(s[7]), @"playing": @(s[8] != 0), @"delayMs": @(s[9]) };
+ }
+ 
+ - (RTC_OBJC_TYPE(RTCAudioProcessingState) *)audioProcessingState {
+diff --git a/sdk/android/api/org/webrtc/PeerConnectionFactory.java b/sdk/android/api/org/webrtc/PeerConnectionFactory.java
+--- a/sdk/android/api/org/webrtc/PeerConnectionFactory.java
++++ b/sdk/android/api/org/webrtc/PeerConnectionFactory.java
+@@ -569,7 +569,23 @@
+   public AudioRecordingState getAudioRecordingState() {
+     checkPeerConnectionFactoryExists();
+     return new AudioRecordingState(nativeGetAudioRecordingState(nativeFactory));
++  }
++
++  /** PCM16LE / mono / 24kHz shared render source. No microphone/peer required. */
++  public long startPcmPlayout() { checkPeerConnectionFactoryExists(); return nativeStartPcmPlayout(nativeFactory); }
++  public int writePcmPlayout(long generation, long epoch, byte[] pcm) {
++    checkPeerConnectionFactoryExists();
++    if (pcm == null || pcm.length == 0 || pcm.length > 48000 || pcm.length % 2 != 0) return -3;
++    return nativeWritePcmPlayout(nativeFactory, generation, epoch, pcm);
+   }
++  public int clearPcmPlayout(long generation, long epoch) { checkPeerConnectionFactoryExists(); return nativeClearPcmPlayout(nativeFactory,generation,epoch); }
++  public int stopPcmPlayout(long generation) { checkPeerConnectionFactoryExists(); return nativeStopPcmPlayout(nativeFactory,generation); }
++  public long[] getPcmPlayoutState() { checkPeerConnectionFactoryExists(); return nativeGetPcmPlayoutState(nativeFactory); }
++  private static native long nativeStartPcmPlayout(long factory);
++  private static native int nativeWritePcmPlayout(long factory, long generation, long epoch, byte[] pcm);
++  private static native int nativeClearPcmPlayout(long factory, long generation, long epoch);
++  private static native int nativeStopPcmPlayout(long factory, long generation);
++  private static native long[] nativeGetPcmPlayoutState(long factory);
+ 
+   public void dispose() {
+     checkPeerConnectionFactoryExists();
+diff --git a/sdk/android/src/jni/pc/peer_connection_factory.cc b/sdk/android/src/jni/pc/peer_connection_factory.cc
+--- a/sdk/android/src/jni/pc/peer_connection_factory.cc
++++ b/sdk/android/src/jni/pc/peer_connection_factory.cc
+@@ -564,6 +564,33 @@
+   });
+ }
+ 
++static jlong JNI_PeerConnectionFactory_StartPcmPlayout(JNIEnv* env, jlong factory) {
++  return PeerConnectionFactoryFromJava(factory)->StartPcmPlayout();
++}
++static jint JNI_PeerConnectionFactory_WritePcmPlayout(JNIEnv* env, jlong factory, jlong generation, jlong epoch,
++    const jni_zero::JavaRef<jbyteArray>& bytes) {
++  if (bytes.is_null()) return -3;
++  const jsize size = env->GetArrayLength(bytes.obj());
++  if (size <= 0 || size > 48000 || size % 2) return -3;
++  std::vector<uint8_t> pcm(size);
++  env->GetByteArrayRegion(bytes.obj(), 0, size, reinterpret_cast<jbyte*>(pcm.data()));
++  if (env->ExceptionCheck()) return -3;
++  return PeerConnectionFactoryFromJava(factory)->WritePcmPlayout(generation, epoch, pcm);
++}
++static jint JNI_PeerConnectionFactory_ClearPcmPlayout(JNIEnv* env, jlong factory, jlong generation, jlong epoch) {
++  return PeerConnectionFactoryFromJava(factory)->ClearPcmPlayout(generation,epoch);
++}
++static jint JNI_PeerConnectionFactory_StopPcmPlayout(JNIEnv* env, jlong factory, jlong generation) {
++  return PeerConnectionFactoryFromJava(factory)->StopPcmPlayout(generation);
++}
++static jni_zero::ScopedJavaLocalRef<jlongArray> JNI_PeerConnectionFactory_GetPcmPlayoutState(JNIEnv* env, jlong factory) {
++  const auto values = PeerConnectionFactoryFromJava(factory)->GetPcmPlayoutState();
++  auto result = jni_zero::ScopedJavaLocalRef<jlongArray>(env, env->NewLongArray(values.size()));
++  std::vector<jlong> longs(values.begin(), values.end());
++  if (!result.is_null()) env->SetLongArrayRegion(result.obj(), 0, longs.size(), longs.data());
++  return result;
++}
++
+ static jlong JNI_PeerConnectionFactory_CreatePeerConnection(
+     JNIEnv* jni,
+     jlong factory,

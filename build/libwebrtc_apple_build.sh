@@ -86,8 +86,11 @@ run_gclient_sync
   cd src
   git apply "$SCRIPT_DIR/../patches/tsnx_hardware_clock_api.patch" \
     --verbose --ignore-space-change --ignore-whitespace --whitespace=nowarn
+  git apply "$SCRIPT_DIR/../patches/custom_audio_source_m144.patch" --ignore-space-change --ignore-whitespace --whitespace=nowarn
   git apply "$SCRIPT_DIR/../patches/external_recording_demand.patch" \
     --verbose --ignore-space-change --ignore-whitespace --whitespace=nowarn
+  git apply "$SCRIPT_DIR/../patches/external_pcm_playout.patch" --ignore-space-change --ignore-whitespace --whitespace=nowarn
+  git apply "$SCRIPT_DIR/../patches/pcm_playout_sdk.patch" --ignore-space-change --ignore-whitespace --whitespace=nowarn
 )
 
 # Run the real Objective-C bridge against a mock ADM before the long slice
@@ -109,11 +112,13 @@ case "$(uname -m)" in
 esac
 gn gen "$OUT_DIR/ownership-tests" --root=src --args="
   target_os=\"mac\" target_cpu=\"$TEST_CPU\"
-  is_debug=$DEBUG is_component_build=false
+  is_debug=$DEBUG is_component_build=false use_clang_modules=false
   rtc_include_tests=true rtc_build_examples=false rtc_enable_protobuf=false
   rtc_use_h264=false use_rtti=true"
-ninja -C "$OUT_DIR/ownership-tests" external_recording_demand_objc_unittests -j 10
+ninja -C "$OUT_DIR/ownership-tests" external_recording_demand_objc_unittests pcm_factory_unittests pcm_playout_unittests -j 10
 "$OUT_DIR/ownership-tests/external_recording_demand_objc_unittests"
+"$OUT_DIR/ownership-tests/pcm_factory_unittests"
+"$OUT_DIR/ownership-tests/pcm_playout_unittests"
 
 echo "xcframework_dynamic_build.sh: MODE=$MODE, DEBUG=$DEBUG, COMMIT=$COMMIT"
 
@@ -133,6 +138,7 @@ gn gen $OUT_DIR/tvOS-arm64-device --root="src" --args="
       enable_libaom = true
       rtc_include_dav1d_in_internal_decoder_factory = true
       use_rtti = true
+      use_clang_modules = false
       is_debug = $DEBUG
       enable_dsyms = $DEBUG
       enable_stripping = true" --ide=xcode
@@ -155,6 +161,7 @@ gn gen $OUT_DIR/tvOS-arm64-simulator --root="src" --args="
       enable_libaom = true
       rtc_include_dav1d_in_internal_decoder_factory = true
       use_rtti = true
+      use_clang_modules = false
       is_debug = $DEBUG
       enable_dsyms = $DEBUG
       enable_stripping = true" --ide=xcode
@@ -178,6 +185,7 @@ gn gen $OUT_DIR/xrOS-arm64-device --root="src" --args="
       enable_libaom = true
       rtc_include_dav1d_in_internal_decoder_factory = true
       use_rtti = true
+      use_clang_modules = false
       is_debug = $DEBUG
       enable_dsyms = $DEBUG
       enable_stripping = true" --ide=xcode
@@ -201,6 +209,7 @@ gn gen $OUT_DIR/xrOS-arm64-simulator --root="src" --args="
       enable_libaom = true
       rtc_include_dav1d_in_internal_decoder_factory = true
       use_rtti = true
+      use_clang_modules = false
       is_debug = $DEBUG
       enable_dsyms = $DEBUG
       enable_stripping = true" --ide=xcode
@@ -224,6 +233,7 @@ gn gen $OUT_DIR/catalyst-arm64 --root="src" --args="
       enable_libaom = true
       rtc_include_dav1d_in_internal_decoder_factory = true
       use_rtti = true
+      use_clang_modules = false
       is_debug = $DEBUG
       enable_dsyms = $DEBUG
       enable_stripping = true" --ide=xcode
@@ -247,6 +257,7 @@ gn gen $OUT_DIR/catalyst-x64 --root="src" --args="
       enable_libaom = true
       rtc_include_dav1d_in_internal_decoder_factory = true
       use_rtti = true
+      use_clang_modules = false
       is_debug = $DEBUG
       enable_dsyms = $DEBUG
       enable_stripping = true" --ide=xcode
@@ -270,6 +281,7 @@ gn gen $OUT_DIR/iOS-arm64-device --root="src" --args="
       enable_libaom = true
       rtc_include_dav1d_in_internal_decoder_factory = true
       use_rtti = true
+      use_clang_modules = false
       is_debug = $DEBUG
       enable_dsyms = $DEBUG
       enable_stripping = true" --ide=xcode
@@ -293,6 +305,7 @@ gn gen $OUT_DIR/iOS-x64-simulator --root="src" --args="
       enable_libaom = true
       rtc_include_dav1d_in_internal_decoder_factory = true
       use_rtti = true
+      use_clang_modules = false
       is_debug = $DEBUG
       enable_dsyms = $DEBUG
       enable_stripping = true" --ide=xcode
@@ -316,6 +329,7 @@ gn gen $OUT_DIR/iOS-arm64-simulator --root="src" --args="
       enable_libaom = true
       rtc_include_dav1d_in_internal_decoder_factory = true
       use_rtti = true
+      use_clang_modules = false
       is_debug = $DEBUG
       enable_dsyms = $DEBUG
       enable_stripping = true" --ide=xcode
@@ -338,6 +352,7 @@ gn gen $OUT_DIR/macOS-x64 --root="src" --args="
       enable_libaom = true
       rtc_include_dav1d_in_internal_decoder_factory = true
       use_rtti = true
+      use_clang_modules = false
       is_debug = $DEBUG
       enable_dsyms = $DEBUG" --ide=xcode
 
@@ -359,6 +374,7 @@ gn gen $OUT_DIR/macOS-arm64 --root="src" --args="
       enable_libaom = true
       rtc_include_dav1d_in_internal_decoder_factory = true
       use_rtti = true
+      use_clang_modules = false
       is_debug = $DEBUG
       enable_dsyms = $DEBUG" --ide=xcode
 
