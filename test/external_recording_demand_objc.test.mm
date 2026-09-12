@@ -9,7 +9,12 @@
 
 // Exercise the options-aware transaction without opening a microphone.
 @interface TestOptionsRecordingModule : RTC_OBJC_TYPE
-(RTCAudioDeviceModule) @property(nonatomic) NSInteger startResult;
+(RTCAudioDeviceModule) {
+  NSInteger _startResult;
+  webrtc::Thread* _expectedWorker;
+  RTC_OBJC_TYPE(RTCAudioProcessingOptions) * _receivedOptions;
+}
+@property(nonatomic) NSInteger startResult;
 @property(nonatomic) webrtc::Thread* expectedWorker;
 @property(nonatomic, strong) RTC_OBJC_TYPE(RTCAudioProcessingOptions) * receivedOptions;
 @end
