@@ -224,7 +224,7 @@ jobs:
         id: cache-key
         run: |
           core_key=$(printf '%s' "$CORE_REVISION" | shasum -a 256 | cut -d ' ' -f 1)
-          echo "prefix=apple-cc-v1-${{ runner.os }}-${{ runner.arch }}-xcode26-${{ matrix.group }}-${{ env.PROFILE }}-${{ hashFiles('build/.gclient') }}-$core_key" >> "$GITHUB_OUTPUT
+          echo "prefix=apple-cc-v1-${{ runner.os }}-${{ runner.arch }}-xcode26-${{ matrix.group }}-${{ env.PROFILE }}-${{ hashFiles('build/.gclient') }}-$core_key" >> "$GITHUB_OUTPUT"
       - name: Restore compiler cache
         uses: actions/cache/restore@v4
         with:
