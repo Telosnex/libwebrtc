@@ -188,41 +188,117 @@ jobs:
           name: libwebrtc-win-${{ matrix.arch }}-${{ matrix.profile }}-tests
           path: build\libwebrtc-win-${{ matrix.arch }}-${{ matrix.profile }}-tests.zip*
 
-  build-apple:
+  build-apple-slices:
     if: github.event_name != 'workflow_dispatch' || github.event.inputs.build_apple == 'true'
     strategy:
       fail-fast: false
-    name: Build WebRTC xcframework for apple
+      matrix:
+        group: [macos, ios-device, ios-simulator, catalyst, tvos, visionos]
+    name: Apple slices (${{ matrix.group }})
     runs-on: macos-26
+    timeout-minutes: 240
+    env:
+      PROFILE: ${{ github.event.inputs.configuration || 'release' }}
+      CORE_REVISION: ${{ github.event.inputs.commitHash }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 1G
+      CCACHE_BASEDIR: ${{ github.workspace }}/build
+      CCACHE_COMPILERCHECK: content
+      CCACHE_COMPRESS: 'true'
     steps:
       - uses: actions/checkout@v5
         with:
           submodules: true
       - name: Select Xcode 26.0
         run: sudo xcode-select --switch /Applications/Xcode_26.0.app/Contents/Developer
-
-      - name: Print ninja version
-        run: ninja --version
-
-      - name: Target OS
-        run: echo -e "\ntarget_os = [\"mac\",\"ios\",]" >> .gclient
-        shell: bash
-        working-directory: build
-        
-      - name: Build WebRTC
-        run: chmod +x ./libwebrtc_apple_build.sh && ./libwebrtc_apple_build.sh --profile ${{ github.event.inputs.configuration || 'release' }} --commit "${{ github.event.inputs.commitHash }}"
-        working-directory: build
-
-      - name: Generate shasum
+      - name: Validate build groups and assembly before native compilation
+        if: matrix.group == 'macos'
+        run: python3 -m unittest discover -s tools/tests -p 'test_apple*.py'
+      - name: Install compiler cache and show runner resources
         run: |
-          cd build/out-${{ github.event.inputs.configuration || 'release' }}
-          shasum -a 256 WebRTC.xcframework.zip > WebRTC.xcframework.zip.shasum
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+          brew install ccache
+          ccache --version
+          sysctl hw.logicalcpu hw.memsize
+          xcodebuild -version
+      - name: Compute stable cache prefix before Target OS edits .gclient
+        id: cache-key
+        run: |
+          core_key=$(printf '%s' "$CORE_REVISION" | shasum -a 256 | cut -d ' ' -f 1)
+          echo "prefix=apple-cc-v1-${{ runner.os }}-${{ runner.arch }}-xcode26-${{ matrix.group }}-${{ env.PROFILE }}-${{ hashFiles('build/.gclient') }}-$core_key" >> "$GITHUB_OUTPUT
+      - name: Restore compiler cache
+        uses: actions/cache/restore@v4
         with:
-          name: webrtc-xcframework-${{ github.event.inputs.configuration || 'release' }}
-          path: build/out-${{ github.event.inputs.configuration || 'release' }}/WebRTC.xcframework.zip*
+          path: .ccache
+          key: ${{ steps.cache-key.outputs.prefix }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ steps.cache-key.outputs.prefix }}-
+      - name: Target OS
+        run: printf '\ntarget_os = ["mac", "ios"]\n' >> .gclient
+        working-directory: build
+      - name: Build slices (native ownership tests included in macos)
+        run: ./libwebrtc_apple_build.sh --profile "$PROFILE" --group "${{ matrix.group }}" --commit "$CORE_REVISION"
+        working-directory: build
+      - name: Cache statistics
+        if: always()
+        run: ccache --show-stats
+      - name: Save compiler cache
+        if: always() && !cancelled()
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ${{ steps.cache-key.outputs.prefix }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Archive verified group (preserve framework symlinks)
+        run: |
+          python3 - <<'PYCODE'
+          import json, os, subprocess
+          from pathlib import Path
+          out = Path('build') / ('out-' + os.environ['PROFILE'])
+          group = '${{ matrix.group }}'
+          manifest = json.loads((out / (group + '.json')).read_text())
+          subprocess.run(['tar', '-C', str(out), '-cf', 'apple-' + group + '.tar',
+            group + '.json', group + '.LICENSE',
+            *[s + '/WebRTC.framework' for s in manifest['slices']]], check=True)
+          PYCODE
+      - name: Upload slice group
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: apple-slices-${{ matrix.group }}-${{ env.PROFILE }}
+          path: apple-${{ matrix.group }}.tar
+          retention-days: 7
+
+  build-apple:
+    needs: build-apple-slices
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.build_apple == 'true'
+    name: Assemble verified Apple xcframework
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      PROFILE: ${{ github.event.inputs.configuration || 'release' }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Select Xcode 26.0
+        run: sudo xcode-select --switch /Applications/Xcode_26.0.app/Contents/Developer
+      - name: Download slice groups from this run
+        uses: actions/download-artifact@v4
+        with:
+          pattern: apple-slices-*-${{ env.PROFILE }}
+          path: apple-slices
+          merge-multiple: true
+      - name: Assemble (no checkout of WebRTC or recompilation)
+        run: |
+          mkdir -p "build/out-$PROFILE"
+          for group in macos ios-device ios-simulator catalyst tvos visionos; do
+            tar -xf "apple-slices/apple-$group.tar" -C "build/out-$PROFILE"
+          done
+          cd build
+          ./libwebrtc_apple_build.sh --profile "$PROFILE" --package-only
+          cd "out-$PROFILE"
+          shasum -a 256 WebRTC.xcframework.zip > WebRTC.xcframework.zip.shasum
+      - name: Upload complete artifact (same published shape/name)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: webrtc-xcframework-${{ env.PROFILE }}
+          path: build/out-${{ env.PROFILE }}/WebRTC.xcframework.zip*
 
   build-android:
     if: github.event_name != 'workflow_dispatch' || github.event.inputs.build_android == 'true'
@@ -308,4 +384,5 @@ jobs:
 
       - name: Upload artifacts to the release
         run: |
+          rm -f "${{ github.workspace }}"/artifacts/apple-*.tar
           gh release upload ${{ github.ref_name }} ${{ github.workspace }}/artifacts/*

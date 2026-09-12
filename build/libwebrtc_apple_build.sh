@@ -5,14 +5,27 @@ set -e
 
 MODE=""
 COMMIT=""
+GROUP="all"
+PACKAGE_ONLY=false
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --profile)
+      [ "$#" -ge 2 ] || { echo "Missing --profile value" >&2; exit 1; }
       MODE="$2"
       shift 2
       ;;
+    --group)
+      [ "$#" -ge 2 ] || { echo "Missing --group value" >&2; exit 1; }
+      GROUP="$2"
+      shift 2
+      ;;
+    --package-only)
+      PACKAGE_ONLY=true
+      shift
+      ;;
     --commit)
+      [ "$#" -ge 2 ] || { echo "Missing --commit value" >&2; exit 1; }
       COMMIT="$2"
       shift 2
       ;;
@@ -27,18 +40,36 @@ while [ "$#" -gt 0 ]; do
       ;;
     *)
       echo "Error: Unknown argument '$1'"
-      echo "Usage: $0 --profile <debug|release> [--commit <hash>]"
+      echo "Usage: $0 --profile <debug|release> [--commit <hash>] [--group <macos|ios-device|ios-simulator|catalyst|tvos|visionos>|--package-only]"
       exit 1
       ;;
   esac
 done
 
 if [ -z "$MODE" ]; then
-  echo "Usage: $0 --profile <debug|release> [--commit <hash>]"
+  echo "Usage: $0 --profile <debug|release> [--commit <hash>] [--group <macos|ios-device|ios-simulator|catalyst|tvos|visionos>|--package-only]"
   exit 1
 fi
 
+case "$MODE" in debug|release) ;; *) echo "Invalid profile" >&2; exit 1 ;; esac
+case "$GROUP" in all|macos|ios-device|ios-simulator|catalyst|tvos|visionos) ;; *) echo "Invalid Apple group" >&2; exit 1 ;; esac
+if "$PACKAGE_ONLY" && [ "$GROUP" != all ]; then echo "Package requires all groups" >&2; exit 1; fi
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OUT_DIR=./out-$MODE
+JOBS="${WEBRTC_BUILD_JOBS:-$(sysctl -n hw.logicalcpu)}"
+case "$JOBS" in ''|*[!0-9]*|0) echo "Invalid job count" >&2; exit 1 ;; esac
+WRAPPER_ARGS=""
+if [ -n "${CCACHE_DIR:-}" ]; then
+  command -v ccache >/dev/null || { echo "CCACHE_DIR set but ccache unavailable" >&2; exit 1; }
+  # ccache hashes compiler contents and flags; never enable sloppiness or reuse
+  # generated objects from an unrelated source revision.
+  export CCACHE_COMPILERCHECK=content
+  WRAPPER_ARGS="cc_wrapper=\"$(command -v ccache)\""
+fi
+export NINJA_STATUS='[%f/%t %es] '
+echo "Apple group=$GROUP jobs=$JOBS profile=$MODE"
+
+if ! "$PACKAGE_ONLY"; then
 DEBUG="false"
 if [ "$MODE" = "debug" ]; then
   DEBUG="true"
@@ -51,8 +82,6 @@ then
 fi
 
 export PATH="$(pwd)/depot_tools:$PATH"
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 run_gclient_sync() {
   default_branch=$(sed -nE "s/.*\"url\":[[:space:]]*'[^@]+@([^']+)'.*/\1/p" "$SCRIPT_DIR/.gclient")
@@ -105,6 +134,7 @@ cp "$SCRIPT_DIR/../BUILD.gn" src/libwebrtc/
   git apply "$SCRIPT_DIR/../patches/add_libwebrtc_build_target.patch" \
     --verbose --ignore-space-change --ignore-whitespace --whitespace=nowarn
 )
+if [ "$GROUP" = all ] || [ "$GROUP" = macos ]; then
 case "$(uname -m)" in
   arm64) TEST_CPU=arm64 ;;
   x86_64) TEST_CPU=x64 ;;
@@ -114,15 +144,18 @@ gn gen "$OUT_DIR/ownership-tests" --root=src --args="
   target_os=\"mac\" target_cpu=\"$TEST_CPU\"
   is_debug=$DEBUG is_component_build=false use_clang_modules=false
   rtc_include_tests=true rtc_build_examples=false rtc_enable_protobuf=false
-  rtc_use_h264=false use_rtti=true"
-ninja -C "$OUT_DIR/ownership-tests" external_recording_demand_objc_unittests pcm_factory_unittests pcm_playout_unittests -j 10
+  rtc_use_h264=false use_rtti=true $WRAPPER_ARGS"
+ninja -C "$OUT_DIR/ownership-tests" external_recording_demand_objc_unittests pcm_factory_unittests pcm_playout_unittests -j "$JOBS"
 "$OUT_DIR/ownership-tests/external_recording_demand_objc_unittests"
 "$OUT_DIR/ownership-tests/pcm_factory_unittests"
 "$OUT_DIR/ownership-tests/pcm_playout_unittests"
+fi
 
 echo "xcframework_dynamic_build.sh: MODE=$MODE, DEBUG=$DEBUG, COMMIT=$COMMIT"
 
-gn gen $OUT_DIR/tvOS-arm64-device --root="src" --args="    
+if [ "$GROUP" = all ] || [ "$GROUP" = tvos ]; then
+gn gen $OUT_DIR/tvOS-arm64-device --root="src" --args="$WRAPPER_ARGS
+
       target_os = \"ios\"
       ios_enable_code_signing = false
       is_component_build = false
@@ -141,11 +174,14 @@ gn gen $OUT_DIR/tvOS-arm64-device --root="src" --args="
       use_clang_modules = false
       is_debug = $DEBUG
       enable_dsyms = $DEBUG
-      enable_stripping = true" --ide=xcode
+      enable_stripping = true"
 
-ninja -C $OUT_DIR/tvOS-arm64-device ios_framework_bundle -j 10
+ninja -C $OUT_DIR/tvOS-arm64-device ios_framework_bundle -j "$JOBS"
+fi
 
-gn gen $OUT_DIR/tvOS-arm64-simulator --root="src" --args="    
+if [ "$GROUP" = all ] || [ "$GROUP" = tvos ]; then
+gn gen $OUT_DIR/tvOS-arm64-simulator --root="src" --args="$WRAPPER_ARGS
+
       target_os = \"ios\"
       ios_enable_code_signing = false
       is_component_build = false
@@ -164,12 +200,15 @@ gn gen $OUT_DIR/tvOS-arm64-simulator --root="src" --args="
       use_clang_modules = false
       is_debug = $DEBUG
       enable_dsyms = $DEBUG
-      enable_stripping = true" --ide=xcode
+      enable_stripping = true"
 
-ninja -C $OUT_DIR/tvOS-arm64-simulator ios_framework_bundle -j 10
+ninja -C $OUT_DIR/tvOS-arm64-simulator ios_framework_bundle -j "$JOBS"
+fi
 
-gn gen $OUT_DIR/xrOS-arm64-device --root="src" --args="
-      treat_warnings_as_errors = false 
+if [ "$GROUP" = all ] || [ "$GROUP" = visionos ]; then
+gn gen $OUT_DIR/xrOS-arm64-device --root="src" --args="$WRAPPER_ARGS
+
+      treat_warnings_as_errors = false
       target_os = \"ios\"
       ios_enable_code_signing = false
       is_component_build = false
@@ -188,11 +227,14 @@ gn gen $OUT_DIR/xrOS-arm64-device --root="src" --args="
       use_clang_modules = false
       is_debug = $DEBUG
       enable_dsyms = $DEBUG
-      enable_stripping = true" --ide=xcode
+      enable_stripping = true"
 
-ninja -C $OUT_DIR/xrOS-arm64-device ios_framework_bundle -j 10
+ninja -C $OUT_DIR/xrOS-arm64-device ios_framework_bundle -j "$JOBS"
+fi
 
-gn gen $OUT_DIR/xrOS-arm64-simulator --root="src" --args="
+if [ "$GROUP" = all ] || [ "$GROUP" = visionos ]; then
+gn gen $OUT_DIR/xrOS-arm64-simulator --root="src" --args="$WRAPPER_ARGS
+
       treat_warnings_as_errors = false
       target_os = \"ios\"
       ios_enable_code_signing = false
@@ -212,11 +254,14 @@ gn gen $OUT_DIR/xrOS-arm64-simulator --root="src" --args="
       use_clang_modules = false
       is_debug = $DEBUG
       enable_dsyms = $DEBUG
-      enable_stripping = true" --ide=xcode
+      enable_stripping = true"
 
-ninja -C $OUT_DIR/xrOS-arm64-simulator ios_framework_bundle -j 10
+ninja -C $OUT_DIR/xrOS-arm64-simulator ios_framework_bundle -j "$JOBS"
+fi
 
-gn gen $OUT_DIR/catalyst-arm64 --root="src" --args="
+if [ "$GROUP" = all ] || [ "$GROUP" = catalyst ]; then
+gn gen $OUT_DIR/catalyst-arm64 --root="src" --args="$WRAPPER_ARGS
+
       treat_warnings_as_errors = false
       target_os = \"ios\"
       ios_enable_code_signing = false
@@ -236,11 +281,14 @@ gn gen $OUT_DIR/catalyst-arm64 --root="src" --args="
       use_clang_modules = false
       is_debug = $DEBUG
       enable_dsyms = $DEBUG
-      enable_stripping = true" --ide=xcode
+      enable_stripping = true"
 
-ninja -C $OUT_DIR/catalyst-arm64 ios_framework_bundle -j 10
+ninja -C $OUT_DIR/catalyst-arm64 ios_framework_bundle -j "$JOBS"
+fi
 
-gn gen $OUT_DIR/catalyst-x64 --root="src" --args="
+if [ "$GROUP" = all ] || [ "$GROUP" = catalyst ]; then
+gn gen $OUT_DIR/catalyst-x64 --root="src" --args="$WRAPPER_ARGS
+
       treat_warnings_as_errors = false
       target_os = \"ios\"
       ios_enable_code_signing = false
@@ -260,11 +308,14 @@ gn gen $OUT_DIR/catalyst-x64 --root="src" --args="
       use_clang_modules = false
       is_debug = $DEBUG
       enable_dsyms = $DEBUG
-      enable_stripping = true" --ide=xcode
+      enable_stripping = true"
 
-ninja -C $OUT_DIR/catalyst-x64 ios_framework_bundle -j 10
+ninja -C $OUT_DIR/catalyst-x64 ios_framework_bundle -j "$JOBS"
+fi
 
-gn gen $OUT_DIR/iOS-arm64-device --root="src" --args="
+if [ "$GROUP" = all ] || [ "$GROUP" = ios-device ]; then
+gn gen $OUT_DIR/iOS-arm64-device --root="src" --args="$WRAPPER_ARGS
+
       treat_warnings_as_errors = false
       target_os = \"ios\"
       ios_enable_code_signing = false
@@ -284,11 +335,14 @@ gn gen $OUT_DIR/iOS-arm64-device --root="src" --args="
       use_clang_modules = false
       is_debug = $DEBUG
       enable_dsyms = $DEBUG
-      enable_stripping = true" --ide=xcode
+      enable_stripping = true"
 
-ninja -C $OUT_DIR/iOS-arm64-device ios_framework_bundle -j 10
+ninja -C $OUT_DIR/iOS-arm64-device ios_framework_bundle -j "$JOBS"
+fi
 
-gn gen $OUT_DIR/iOS-x64-simulator --root="src" --args="
+if [ "$GROUP" = all ] || [ "$GROUP" = ios-simulator ]; then
+gn gen $OUT_DIR/iOS-x64-simulator --root="src" --args="$WRAPPER_ARGS
+
       treat_warnings_as_errors = false
       target_os = \"ios\"
       ios_enable_code_signing = false
@@ -308,11 +362,14 @@ gn gen $OUT_DIR/iOS-x64-simulator --root="src" --args="
       use_clang_modules = false
       is_debug = $DEBUG
       enable_dsyms = $DEBUG
-      enable_stripping = true" --ide=xcode
+      enable_stripping = true"
 
-ninja -C $OUT_DIR/iOS-x64-simulator ios_framework_bundle -j 10
+ninja -C $OUT_DIR/iOS-x64-simulator ios_framework_bundle -j "$JOBS"
+fi
 
-gn gen $OUT_DIR/iOS-arm64-simulator --root="src" --args="
+if [ "$GROUP" = all ] || [ "$GROUP" = ios-simulator ]; then
+gn gen $OUT_DIR/iOS-arm64-simulator --root="src" --args="$WRAPPER_ARGS
+
       treat_warnings_as_errors = false
       target_os = \"ios\"
       ios_enable_code_signing = false
@@ -332,11 +389,14 @@ gn gen $OUT_DIR/iOS-arm64-simulator --root="src" --args="
       use_clang_modules = false
       is_debug = $DEBUG
       enable_dsyms = $DEBUG
-      enable_stripping = true" --ide=xcode
+      enable_stripping = true"
 
-ninja -C $OUT_DIR/iOS-arm64-simulator ios_framework_bundle -j 10
+ninja -C $OUT_DIR/iOS-arm64-simulator ios_framework_bundle -j "$JOBS"
+fi
 
-gn gen $OUT_DIR/macOS-x64 --root="src" --args="
+if [ "$GROUP" = all ] || [ "$GROUP" = macos ]; then
+gn gen $OUT_DIR/macOS-x64 --root="src" --args="$WRAPPER_ARGS
+
       treat_warnings_as_errors = false
       target_os=\"mac\"
       target_cpu=\"x64\"
@@ -354,11 +414,14 @@ gn gen $OUT_DIR/macOS-x64 --root="src" --args="
       use_rtti = true
       use_clang_modules = false
       is_debug = $DEBUG
-      enable_dsyms = $DEBUG" --ide=xcode
+      enable_dsyms = $DEBUG"
 
-ninja -C $OUT_DIR/macOS-x64 mac_framework_bundle -j 10
+ninja -C $OUT_DIR/macOS-x64 mac_framework_bundle -j "$JOBS"
+fi
 
-gn gen $OUT_DIR/macOS-arm64 --root="src" --args="
+if [ "$GROUP" = all ] || [ "$GROUP" = macos ]; then
+gn gen $OUT_DIR/macOS-arm64 --root="src" --args="$WRAPPER_ARGS
+
       treat_warnings_as_errors = false
       target_os=\"mac\"
       target_cpu=\"x64\"
@@ -376,9 +439,28 @@ gn gen $OUT_DIR/macOS-arm64 --root="src" --args="
       use_rtti = true
       use_clang_modules = false
       is_debug = $DEBUG
-      enable_dsyms = $DEBUG" --ide=xcode
+      enable_dsyms = $DEBUG"
 
-ninja -C $OUT_DIR/macOS-arm64 mac_framework_bundle -j 10
+ninja -C $OUT_DIR/macOS-arm64 mac_framework_bundle -j "$JOBS"
+fi
+
+if [ "$GROUP" = all ]; then
+  BUILT_GROUP_LIST="macos ios-device ios-simulator catalyst tvos visionos"
+else
+  BUILT_GROUP_LIST="$GROUP"
+fi
+for built_group in $BUILT_GROUP_LIST; do
+  python3 "$SCRIPT_DIR/../tools/apple_artifacts.py" record --out "$OUT_DIR" \
+    --mode "$MODE" --wrapper "$SCRIPT_DIR/.." --core "$SCRIPT_DIR/src" --group "$built_group"
+done
+if [ "$GROUP" != all ]; then
+  echo "Apple group $GROUP complete; packaging happens only after all groups pass."
+  exit 0
+fi
+fi # not package-only
+
+python3 "$SCRIPT_DIR/../tools/apple_artifacts.py" verify --out "$OUT_DIR" \
+  --mode "$MODE" --wrapper "$SCRIPT_DIR/.."
 
 rm -rf $OUT_DIR/*-lib $OUT_DIR/WebRTC.*
 
@@ -409,7 +491,7 @@ xcodebuild -create-xcframework \
   -framework $OUT_DIR/tvOS-arm64-simulator/WebRTC.framework \
   -output $OUT_DIR/WebRTC.xcframework
 
-cp ./src/LICENSE $OUT_DIR/WebRTC.xcframework/
+cp "$OUT_DIR/macos.LICENSE" "$OUT_DIR/WebRTC.xcframework/LICENSE"
 
 cd $OUT_DIR/WebRTC.xcframework/macos-arm64_x86_64/WebRTC.framework/
 mv WebRTC Versions/A/WebRTC
@@ -420,4 +502,4 @@ cd $OUT_DIR/WebRTC.xcframework/ios-arm64_x86_64-maccatalyst/WebRTC.framework/
 mv WebRTC Versions/A/WebRTC
 ln -s Versions/Current/WebRTC WebRTC
 cd ../../../
-zip --symlinks -9 -r WebRTC.xcframework.zip WebRTC.xcframework
+zip --symlinks -6 -r WebRTC.xcframework.zip WebRTC.xcframework
