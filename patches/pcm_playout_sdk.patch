@@ -61,19 +61,19 @@ diff --git a/pc/peer_connection_factory.cc b/pc/peer_connection_factory.cc
  
  #include <cstdint>
  #include <cstdio>
-@@ -121,6 +122,12 @@
- PeerConnectionFactory::~PeerConnectionFactory() {
+@@ -122,6 +123,12 @@
    RTC_DCHECK_RUN_ON(signaling_thread());
    worker_thread()->BlockingCall([this] {
+     RTC_DCHECK_RUN_ON(worker_thread());
 +    if (pcm_engine_ && pcm_source_) {
 +      pcm_source_->Quiesce(pcm_source_->State().generation);
 +      pcm_engine_->media_engine()->voice().GetAudioState()->RemoveExternalPlayoutSource(pcm_source_.get(), true);
 +    }
 +    pcm_engine_.reset();
 +    pcm_source_.reset();
-     RTC_DCHECK_RUN_ON(worker_thread());
      decode_metronome_ = nullptr;
      encode_metronome_ = nullptr;
+     StopAecDump();
 @@ -211,7 +218,58 @@
      return;
    media_engine_ref_->media_engine()->voice().StopAecDump();

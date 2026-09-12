@@ -14,7 +14,6 @@ namespace {
 using namespace webrtc;
 using namespace webrtc::test;
 using ::testing::_;
-using ::testing::Invoke;
 using ::testing::NiceMock;
 using ::testing::Return;
 std::vector<uint8_t> Pcm(size_t frames, int16_t sample = 1000) {
@@ -91,15 +90,15 @@ struct Fixture {
     config.audio_device_module = adm;
     config.audio_processing = apm;
     state = make_ref_counted<webrtc::internal::AudioState>(config);
-    ON_CALL(*adm, Playing()).WillByDefault(Invoke([this] { return playing; }));
-    ON_CALL(*adm, StartPlayout()).WillByDefault(Invoke([this] {
+    ON_CALL(*adm, Playing()).WillByDefault([this] { return playing; });
+    ON_CALL(*adm, StartPlayout()).WillByDefault([this] {
       playing = true;
       return 0;
-    }));
-    ON_CALL(*adm, StopPlayout()).WillByDefault(Invoke([this] {
+    });
+    ON_CALL(*adm, StopPlayout()).WillByDefault([this] {
       playing = false;
       return 0;
-    }));
+    });
     source.Start();
   }
 };
@@ -150,14 +149,14 @@ TEST(PcmPlayout, DeviceAndApmReceiveTheSameAppRenderMix) {
   bool saw_voice = false;
   EXPECT_CALL(*f.apm, ProcessReverseStream(::testing::A<const int16_t*>(), _, _,
                                            ::testing::A<int16_t*>()))
-      .WillRepeatedly(Invoke([&](const int16_t* src, const StreamConfig& in,
-                                 const StreamConfig&, int16_t* dest) {
+      .WillRepeatedly([&](const int16_t* src, const StreamConfig& in,
+                          const StreamConfig&, int16_t* dest) {
         EXPECT_EQ(in.num_channels(), 1u);
         for (size_t i = 0; i < in.num_frames(); ++i)
           if (std::abs(src[i]) > 100) saw_voice = true;
         EXPECT_EQ(src, dest);
         return 0;
-      }));
+      });
   int16_t pcm[480];
   size_t count;
   int64_t elapsed, ntp;
@@ -176,12 +175,12 @@ TEST(PcmPlayout, NullPollerDoesNotConsumeSuspendedPcm) {
     NiceMock<MockAudioReceiveStream> receiver;
     ON_CALL(receiver, PreferredSampleRate()).WillByDefault(Return(48000));
     ON_CALL(receiver, GetAudioFrameWithInfo(_, _))
-        .WillByDefault(Invoke([](int rate, AudioFrame* frame) {
+        .WillByDefault([](int rate, AudioFrame* frame) {
           frame->UpdateFrame(0, nullptr, rate / 100, rate,
                              AudioFrame::kNormalSpeech, AudioFrame::kVadUnknown,
                              1);
           return AudioMixer::Source::AudioFrameInfo::kMuted;
-        }));
+        });
     f.state->AddReceivingStream(&receiver);
     f.state->AddExternalPlayoutSource(&f.source);
     auto bytes = Pcm(2400);
