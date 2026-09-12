@@ -317,7 +317,7 @@ diff --git a/sdk/android/src/jni/pc/peer_connection_factory.cc b/sdk/android/src
 +}
 +static jni_zero::ScopedJavaLocalRef<jlongArray> JNI_PeerConnectionFactory_GetPcmPlayoutState(JNIEnv* env, jlong factory) {
 +  const auto values = PeerConnectionFactoryFromJava(factory)->GetPcmPlayoutState();
-+  auto result = jni_zero::ScopedJavaLocalRef<jlongArray>(env, env->NewLongArray(values.size()));
++  auto result = jni_zero::ScopedJavaLocalRef<jlongArray>::Adopt(env, env->NewLongArray(values.size()));
 +  std::vector<jlong> longs(values.begin(), values.end());
 +  if (!result.is_null()) env->SetLongArrayRegion(result.obj(), 0, longs.size(), longs.data());
 +  return result;
