@@ -56,7 +56,7 @@ jobs:
     name: Build libwebrtc.so for Linux (${{ matrix.arch }}-${{ matrix.profile }})
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           submodules: true
 
@@ -78,15 +78,11 @@ jobs:
         working-directory: build
 
       - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
-        with:
-          android: false
-          tool-cache: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/share/powershell /opt/ghc /usr/local/.ghcup
+          sudo docker system prune --all --force || true
+          sudo apt-get clean
+          df -h
 
       - name: Build WebRTC
         run: chmod +x ./libwebrtc_linux_build.sh && ./libwebrtc_linux_build.sh --arch ${{ matrix.arch }} --profile ${{ matrix.profile }} --commit "${{ github.event.inputs.commitHash }}"
@@ -130,7 +126,7 @@ jobs:
     name: Build libwebrtc.dll for Windows (${{ matrix.arch }}-${{ matrix.profile }})
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           submodules: true
 
@@ -206,7 +202,7 @@ jobs:
       CCACHE_COMPILERCHECK: content
       CCACHE_COMPRESS: 'true'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           submodules: true
       - name: Select Xcode 26.0
@@ -226,7 +222,7 @@ jobs:
           core_key=$(printf '%s' "$CORE_REVISION" | shasum -a 256 | cut -d ' ' -f 1)
           echo "prefix=apple-cc-v1-${{ runner.os }}-${{ runner.arch }}-xcode26-${{ matrix.group }}-${{ env.PROFILE }}-${{ hashFiles('build/.gclient') }}-$core_key" >> "$GITHUB_OUTPUT"
       - name: Restore compiler cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .ccache
           key: ${{ steps.cache-key.outputs.prefix }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -243,7 +239,7 @@ jobs:
         run: ccache --show-stats
       - name: Save compiler cache
         if: always() && !cancelled()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .ccache
           key: ${{ steps.cache-key.outputs.prefix }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -275,11 +271,11 @@ jobs:
     env:
       PROFILE: ${{ github.event.inputs.configuration || 'release' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Select Xcode 26.0
         run: sudo xcode-select --switch /Applications/Xcode_26.0.app/Contents/Developer
       - name: Download slice groups from this run
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: apple-slices-*-${{ env.PROFILE }}
           path: apple-slices
@@ -310,7 +306,7 @@ jobs:
     name: Build libwebrtc.aar for Android (${{ matrix.profile }})
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           submodules: true
 
@@ -331,15 +327,11 @@ jobs:
         working-directory: build
 
       - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
-        with:
-          android: false
-          tool-cache: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/share/powershell /opt/ghc /usr/local/.ghcup
+          sudo docker system prune --all --force || true
+          sudo apt-get clean
+          df -h
 
       - name: Build WebRTC
         run: chmod +x ./libwebrtc_android_build.sh && ./libwebrtc_android_build.sh --profile ${{ matrix.profile }} --commit "${{ github.event.inputs.commitHash }}"
@@ -371,10 +363,10 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: ${{ github.workspace }}/artifacts
           merge-multiple: true
