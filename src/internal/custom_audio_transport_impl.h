@@ -102,10 +102,10 @@ class CustomAudioTransportFactory : public AudioTransportFactory {
   ~CustomAudioTransportFactory() = default;
   void OnAudioStateChanged(AudioState* state) override {
     audio_state_ = state;
-    if (!state) pcm_source_.Stop();
+    if (!state) pcm_sources_.StopAll();
   }
   AudioState* audio_state() const { return audio_state_; }
-  libwebrtc::PcmPlayoutSource& pcm_source() { return pcm_source_; }
+  libwebrtc::PcmPlayoutSources& pcm_sources() { return pcm_sources_; }
   std::unique_ptr<AudioTransport> Create(
       webrtc::AudioMixer* mixer, webrtc::AudioProcessing* audio_processing,
       webrtc::AsyncAudioProcessing::Factory* async_audio_processing_factory)
@@ -127,7 +127,7 @@ class CustomAudioTransportFactory : public AudioTransportFactory {
   const std::shared_ptr<libwebrtc::AudioClockCorrection> clock_correction_;
   CustomAudioTransportImpl* audio_transport_impl_ = nullptr;
   AudioState* audio_state_ = nullptr;
-  libwebrtc::PcmPlayoutSource pcm_source_;
+  libwebrtc::PcmPlayoutSources pcm_sources_;
 };
 
 }  // namespace webrtc

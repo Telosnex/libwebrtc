@@ -75,6 +75,51 @@ TEST(PcmPlayout, ResamplesMonoIntoMixerAndClearRemovesFilterTail) {
   EXPECT_TRUE(std::all_of(frame.data(), frame.data() + 480,
                           [](int16_t x) { return x == 0; }));
 }
+TEST(PcmPlayout, StereoFramesPreserveChannelsAndUseTimeBasedCapacity) {
+  PcmPlayoutSource source;
+  auto generation = source.Start(48000, 2, true);
+  ASSERT_GT(generation, 0);
+  auto bytes = Pcm(48000 * 2, 2000);
+  for (size_t i = 2; i < bytes.size(); i += 4) {
+    bytes[i] = 0x18; bytes[i + 1] = 0xfc;  // Right = -1000.
+  }
+  EXPECT_EQ(source.Write(generation, 0, bytes.data(), 2), -3);
+  for (int i = 0; i < 5; ++i)
+    ASSERT_EQ(source.Write(generation, 0, bytes.data(), bytes.size()), 0);
+  EXPECT_EQ(source.State().queued_frames, 240000);
+  EXPECT_EQ(source.Write(generation, 0, bytes.data(), 4), -4);
+  AudioFrame frame;
+  source.GetAudioFrameWithInfo(48000, &frame);
+  EXPECT_EQ(frame.num_channels_, 2u);
+  EXPECT_EQ(frame.data()[200], 2000);
+  EXPECT_EQ(frame.data()[201], -1000);
+  EXPECT_EQ(source.State().consumed_frames, 480);
+  source.Clear(generation, 1);
+  source.GetAudioFrameWithInfo(48000, &frame);
+  EXPECT_TRUE(std::all_of(frame.data(), frame.data() + 960,
+                          [](int16_t x) { return x == 0; }));
+}
+TEST(PcmPlayout, SharedRegistryIsBoundedExclusiveCompatibleAndNeverReusesTokens) {
+  PcmPlayoutSources sources;
+  EXPECT_EQ(sources.Acquire(48000, 1, true), -3);
+  const auto speech = sources.Acquire(24000, 1, true);
+  const auto music = sources.Acquire(48000, 2, true);
+  ASSERT_GT(speech, 0); ASSERT_GT(music, speech);
+  EXPECT_EQ(sources.ExclusiveGeneration(), 0);
+  EXPECT_EQ(sources.Acquire(24000, 1, true), -4);
+  EXPECT_EQ(sources.Acquire(24000, 1, false), -5);
+  EXPECT_EQ(sources.Find(speech)->PreferredSampleRate(), 48000);
+  sources.Find(speech)->Quiesce(speech);
+  EXPECT_EQ(sources.Acquire(24000, 1, true), -4);
+  sources.Release(speech);
+  EXPECT_EQ(sources.Find(speech), nullptr);
+  EXPECT_NE(sources.Find(music), nullptr);
+  sources.StopAll();
+  const auto exclusive = sources.Acquire(24000, 1, false);
+  EXPECT_GT(exclusive, music);
+  EXPECT_EQ(sources.ExclusiveGeneration(), exclusive);
+  EXPECT_EQ(sources.Acquire(48000, 2, true), -5);
+}
 struct Fixture {
   webrtc::scoped_refptr<NiceMock<MockAudioDeviceModule>> adm =
       make_ref_counted<NiceMock<MockAudioDeviceModule>>();
@@ -113,6 +158,46 @@ TEST(PcmPlayout, PeerlessDeviceLifetimeAndCaptureUntouched) {
   ASSERT_EQ(f.state->AddExternalPlayoutSource(&f.source), 0);
   EXPECT_TRUE(f.playing);
   ASSERT_EQ(f.state->RemoveExternalPlayoutSource(&f.source), 0);
+  EXPECT_FALSE(f.playing);
+}
+TEST(PcmPlayout, MixedSpeechIsCenteredAndIndependentStopKeepsMusicAndDevice) {
+  Fixture f;
+  PcmPlayoutSource music;
+  music.Start(48000, 2, true);
+  EXPECT_CALL(*f.adm, StartRecording()).Times(0);
+  EXPECT_CALL(*f.adm, StopRecording()).Times(0);
+  EXPECT_CALL(*f.adm, InitPlayout()).Times(1);
+  EXPECT_CALL(*f.adm, StartPlayout()).Times(1);
+  EXPECT_CALL(*f.adm, StopPlayout()).Times(1);
+  ASSERT_EQ(f.state->AddExternalPlayoutSource(&f.source), 0);
+  ASSERT_EQ(f.state->AddExternalPlayoutSource(&music), 0);
+  const auto speech = Pcm(2400, 1000);
+  auto stereo = Pcm(4800 * 2, 2000);
+  for (size_t i = 2; i < stereo.size(); i += 4) {
+    stereo[i] = 0x18; stereo[i + 1] = 0xfc;
+  }
+  f.source.Write(f.source.State().generation, 0, speech.data(), speech.size());
+  music.Write(music.State().generation, 0, stereo.data(), stereo.size());
+  int16_t pcm[960]; size_t count = 0; int64_t elapsed, ntp;
+  EXPECT_CALL(*f.apm, ProcessReverseStream(::testing::A<const int16_t*>(), _, _,
+                                          ::testing::A<int16_t*>()))
+      .WillRepeatedly([](const int16_t* src, const StreamConfig& in,
+                         const StreamConfig&, int16_t* dest) {
+        EXPECT_EQ(in.num_channels(), 2u); EXPECT_EQ(src, dest); return 0;
+      });
+  for (int i = 0; i < 3; ++i)
+    f.state->audio_transport()->NeedMorePlayData(480, 4, 2, 48000, pcm, count, &elapsed, &ntp);
+  EXPECT_EQ(count, 960u);
+  EXPECT_NEAR(pcm[400], 3000, 100);
+  EXPECT_NEAR(pcm[401], 0, 30);
+  EXPECT_EQ(f.source.State().consumed_frames, 720);
+  EXPECT_EQ(music.State().consumed_frames, 1440);
+  ASSERT_EQ(f.state->RemoveExternalPlayoutSource(&f.source), 0);
+  EXPECT_TRUE(f.playing);
+  f.state->audio_transport()->NeedMorePlayData(480, 4, 2, 48000, pcm, count, &elapsed, &ntp);
+  EXPECT_NEAR(pcm[400], 2000, 100);
+  EXPECT_NEAR(pcm[401], -1000, 100);
+  ASSERT_EQ(f.state->RemoveExternalPlayoutSource(&music), 0);
   EXPECT_FALSE(f.playing);
 }
 TEST(PcmPlayout, ReceiverAndPcmTeardownDoNotStopEachOther) {

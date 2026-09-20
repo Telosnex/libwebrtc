@@ -109,6 +109,7 @@ git apply "libwebrtc/patches/custom_audio_source_m144.patch" -v --ignore-space-c
 git apply "libwebrtc/patches/external_recording_demand.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 git apply "libwebrtc/patches/external_pcm_playout.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 git apply "libwebrtc/patches/pcm_playout_sdk.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
+git apply "libwebrtc/patches/concurrent_pcm_playout.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 git apply "libwebrtc/patches/add_libwebrtc_build_target.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 git apply "libwebrtc/patches/fix_desktop_capture_compile.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
 git apply "libwebrtc/patches/tsnx_alsa_capture_depth.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn

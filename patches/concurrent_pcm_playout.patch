@@ -1,0 +1,447 @@
+diff --git a/api/peer_connection_interface.h b/api/peer_connection_interface.h
+--- a/api/peer_connection_interface.h
++++ b/api/peer_connection_interface.h
+@@ -1599,6 +1599,8 @@
+   // V1 app PCM16LE, mono/24kHz. Worker-thread methods; bounded source shares
+   // the RTP mixer, APM render reference and ADM. No microphone or peer needed.
+   virtual int64_t StartPcmPlayout() { return -1; }
++  virtual int64_t StartPcmPlayoutSource(int rate, int channels, bool shared) { return -1; }
++  virtual std::vector<int64_t> GetPcmPlayoutSourceState(int64_t generation) { return {}; }
+   virtual int WritePcmPlayout(int64_t generation, int64_t epoch, const std::vector<uint8_t>& pcm) { return -1; }
+   virtual int ClearPcmPlayout(int64_t generation, int64_t epoch) { return -1; }
+   virtual int StopPcmPlayout(int64_t generation) { return -1; }
+diff --git a/modules/audio_device/audio_engine_device.mm b/modules/audio_device/audio_engine_device.mm
+--- a/modules/audio_device/audio_engine_device.mm
++++ b/modules/audio_device/audio_engine_device.mm
+@@ -778,17 +778,15 @@
+     return -1;
+   }
+ 
+-  *available = false;
++  *available = true;
+ 
+   return 0;
+ }
+ 
+ int32_t AudioEngineDevice::SetStereoPlayout(bool enable) {
+-  LOGW() << "SetStereoPlayout: Not implemented, value:" << enable;
+-
+-  audio_device_buffer_->SetPlayoutChannels(1);
+-
+-  return 0;
++  // Device output is stereo from initialization. Manual capture-only rendering
++  // retains its own mono format. Joining a PCM owner never reopens the graph.
++  return enable ? 0 : -1;
+ }
+ 
+ int32_t AudioEngineDevice::StereoPlayout(bool* enabled) const {
+@@ -797,7 +795,7 @@
+     return -1;
+   }
+ 
+-  *enabled = false;
++  *enabled = true;
+ 
+   return 0;
+ }
+@@ -2387,7 +2385,7 @@
+     AVAudioFormat* engine_output_format = [[AVAudioFormat alloc]
+         initWithCommonFormat:output_node_format.commonFormat  // Usually float32
+                   sampleRate:output_node_format.sampleRate
+-                    channels:1
++                    channels:2
+                  interleaved:output_node_format.interleaved];
+ 
+     audio_device_buffer_->SetPlayoutSampleRate(engine_output_format.sampleRate);
+@@ -2404,7 +2402,7 @@
+     AVAudioFormat* rtc_output_format =
+         [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatInt16
+                                          sampleRate:engine_output_format.sampleRate
+-                                           channels:1
++                                           channels:2
+                                         interleaved:YES];
+ 
+     AVAudioSourceNodeRenderBlock source_block =
+@@ -2415,7 +2413,7 @@
+           int16_t* dest_buffer = (int16_t*)outputData->mBuffers[0].mData;
+ 
+           fine_audio_buffer_->GetPlayoutData(
+-              webrtc::ArrayView<int16_t>(static_cast<int16_t*>(dest_buffer), frameCount),
++              webrtc::ArrayView<int16_t>(static_cast<int16_t*>(dest_buffer), frameCount * 2),
+               kFixedPlayoutDelayEstimate);
+ 
+           return noErr;
+diff --git a/pc/peer_connection_factory.cc b/pc/peer_connection_factory.cc
+--- a/pc/peer_connection_factory.cc
++++ b/pc/peer_connection_factory.cc
+@@ -123,12 +123,15 @@
+   RTC_DCHECK_RUN_ON(signaling_thread());
+   worker_thread()->BlockingCall([this] {
+     RTC_DCHECK_RUN_ON(worker_thread());
+-    if (pcm_engine_ && pcm_source_) {
+-      pcm_source_->Quiesce(pcm_source_->State().generation);
+-      pcm_engine_->media_engine()->voice().GetAudioState()->RemoveExternalPlayoutSource(pcm_source_.get(), true);
++    if (pcm_engine_ && pcm_sources_) {
++      for (const auto& source : pcm_sources_->sources()) {
++        if (!source) continue;
++        source->Quiesce(source->State().generation);
++        pcm_engine_->media_engine()->voice().GetAudioState()->RemoveExternalPlayoutSource(source.get(), true);
++      }
+     }
+     pcm_engine_.reset();
+-    pcm_source_.reset();
++    pcm_sources_.reset();
+     decode_metronome_ = nullptr;
+     encode_metronome_ = nullptr;
+     StopAecDump();
+@@ -221,41 +224,52 @@
+ }
+ 
+ int64_t PeerConnectionFactory::StartPcmPlayout() {
+-  RTC_DCHECK_RUN_ON(worker_thread());
+-  if (pcm_engine_) return -1;
+-  if (!pcm_source_) pcm_source_ = std::make_unique<libwebrtc::PcmPlayoutSource>();
+-  auto engine = std::make_unique<ConnectionContext::MediaEngineReference>(context_);
+-  if (!engine->media_engine()) return -1;
+-  auto state = engine->media_engine()->voice().GetAudioState();
+-  if (!state) return -1;
+-  const auto generation = pcm_source_->Start();
+-  if (generation <= 0) return -1;
+-  if (state->AddExternalPlayoutSource(pcm_source_.get()) != 0) {
+-    pcm_source_->Stop();
++  return StartPcmPlayoutSource(24000, 1, false);
++}
++int64_t PeerConnectionFactory::StartPcmPlayoutSource(int rate, int channels, bool shared) {
++  RTC_DCHECK_RUN_ON(worker_thread());
++  if (!pcm_sources_) pcm_sources_ = std::make_unique<libwebrtc::PcmPlayoutSources>();
++  const auto generation = pcm_sources_->Acquire(rate, channels, shared);
++  if (generation <= 0) return generation;
++  if (!pcm_engine_) pcm_engine_ = std::make_unique<ConnectionContext::MediaEngineReference>(context_);
++  auto* engine = pcm_engine_->media_engine();
++  auto state = engine ? engine->voice().GetAudioState() : nullptr;
++  if (!state || state->AddExternalPlayoutSource(pcm_sources_->Find(generation)) != 0) {
++    pcm_sources_->Release(generation);
++    if (pcm_sources_->empty()) pcm_engine_.reset();
+     return -1;
+   }
+-  pcm_engine_ = std::move(engine);
+   return generation;
+ }
+ int PeerConnectionFactory::WritePcmPlayout(int64_t generation, int64_t epoch, const std::vector<uint8_t>& pcm) {
+   RTC_DCHECK_RUN_ON(worker_thread());
+-  return pcm_engine_ ? pcm_source_->Write(generation, epoch, pcm.data(), pcm.size()) : -2;
++  auto* source = pcm_sources_ ? pcm_sources_->Find(generation) : nullptr;
++  return source ? source->Write(generation, epoch, pcm.data(), pcm.size()) : -2;
+ }
+ int PeerConnectionFactory::ClearPcmPlayout(int64_t generation, int64_t epoch) {
+   RTC_DCHECK_RUN_ON(worker_thread());
+-  return pcm_engine_ ? pcm_source_->Clear(generation, epoch) : -2;
++  auto* source = pcm_sources_ ? pcm_sources_->Find(generation) : nullptr;
++  return source ? source->Clear(generation, epoch) : -2;
+ }
+ int PeerConnectionFactory::StopPcmPlayout(int64_t generation) {
+   RTC_DCHECK_RUN_ON(worker_thread());
+-  if (!pcm_engine_ || pcm_source_->Quiesce(generation) != 0) return -2;
+-  if (pcm_engine_->media_engine()->voice().GetAudioState()->RemoveExternalPlayoutSource(pcm_source_.get()) != 0) return -1;
+-  pcm_source_->Stop();
+-  pcm_engine_.reset();
++  auto* source = pcm_sources_ ? pcm_sources_->Find(generation) : nullptr;
++  if (!pcm_engine_ || !source || source->Quiesce(generation) != 0) return -2;
++  if (pcm_engine_->media_engine()->voice().GetAudioState()->RemoveExternalPlayoutSource(source) != 0) return -1;
++  pcm_sources_->Release(generation);
++  if (pcm_sources_->empty()) pcm_engine_.reset();
+   return 0;
+ }
+ std::vector<int64_t> PeerConnectionFactory::GetPcmPlayoutState() {
+   RTC_DCHECK_RUN_ON(worker_thread());
+-  const auto s = pcm_source_ ? pcm_source_->State() : libwebrtc::RTCAudioDevice::PcmPlayoutState{};
++  auto state = GetPcmPlayoutSourceState(pcm_sources_ ? pcm_sources_->ExclusiveGeneration() : 0);
++  state.resize(10);  // Preserve the legacy SDK shape.
++  return state;
++}
++std::vector<int64_t> PeerConnectionFactory::GetPcmPlayoutSourceState(int64_t generation) {
++  RTC_DCHECK_RUN_ON(worker_thread());
++  auto* source = pcm_sources_ ? pcm_sources_->Find(generation) : nullptr;
++  const auto s = source ? source->State() : libwebrtc::RTCAudioDevice::PcmPlayoutState{};
+   bool playing = false;
+   int delay = -1;
+   if (pcm_engine_) {
+@@ -268,7 +282,8 @@
+     }
+   }
+   return {s.generation, s.epoch, s.queued_frames, s.accepted_frames, s.consumed_frames,
+-          s.discarded_frames, s.render_callbacks, s.underrun_callbacks, playing ? 1 : 0, delay};
++          s.discarded_frames, s.render_callbacks, s.underrun_callbacks, playing ? 1 : 0, delay,
++          s.sample_rate, s.channels, s.shared ? 1 : 0};
+ }
+ 
+ AudioProcessingState
+diff --git a/pc/peer_connection_factory.h b/pc/peer_connection_factory.h
+--- a/pc/peer_connection_factory.h
++++ b/pc/peer_connection_factory.h
+@@ -43,7 +43,7 @@
+ #include "rtc_base/thread.h"
+ #include "rtc_base/thread_annotations.h"
+ 
+-namespace libwebrtc { class PcmPlayoutSource; }
++namespace libwebrtc { class PcmPlayoutSources; }
+ namespace webrtc {
+ 
+ class PeerConnectionFactory : public PeerConnectionFactoryInterface {
+@@ -88,6 +88,8 @@
+ 
+   AudioProcessingState GetAudioProcessingState() override;
+   int64_t StartPcmPlayout() override;
++  int64_t StartPcmPlayoutSource(int rate, int channels, bool shared) override;
++  std::vector<int64_t> GetPcmPlayoutSourceState(int64_t generation) override;
+   int WritePcmPlayout(int64_t generation, int64_t epoch, const std::vector<uint8_t>& pcm) override;
+   int ClearPcmPlayout(int64_t generation, int64_t epoch) override;
+   int StopPcmPlayout(int64_t generation) override;
+@@ -135,7 +137,7 @@
+       const Environment& env,
+       const PeerConnectionInterface::RTCConfiguration& configuration);
+ 
+-  std::unique_ptr<libwebrtc::PcmPlayoutSource> pcm_source_ RTC_GUARDED_BY(worker_thread());
++  std::unique_ptr<libwebrtc::PcmPlayoutSources> pcm_sources_ RTC_GUARDED_BY(worker_thread());
+   std::unique_ptr<ConnectionContext::MediaEngineReference> pcm_engine_ RTC_GUARDED_BY(worker_thread());
+   Environment env_;
+   scoped_refptr<ConnectionContext> context_;
+diff --git a/pc/peer_connection_factory_proxy.h b/pc/peer_connection_factory_proxy.h
+--- a/pc/peer_connection_factory_proxy.h
++++ b/pc/peer_connection_factory_proxy.h
+@@ -59,6 +59,8 @@
+ PROXY_SECONDARY_METHOD0(AudioProcessingState,
+                         GetAudioProcessingState)
+ PROXY_SECONDARY_METHOD0(int64_t, StartPcmPlayout)
++PROXY_SECONDARY_METHOD3(int64_t, StartPcmPlayoutSource, int, int, bool)
++PROXY_SECONDARY_METHOD1(std::vector<int64_t>, GetPcmPlayoutSourceState, int64_t)
+ PROXY_SECONDARY_METHOD3(int, WritePcmPlayout, int64_t, int64_t, const std::vector<uint8_t>&)
+ PROXY_SECONDARY_METHOD2(int, ClearPcmPlayout, int64_t, int64_t)
+ PROXY_SECONDARY_METHOD1(int, StopPcmPlayout, int64_t)
+diff --git a/sdk/android/api/org/webrtc/PeerConnectionFactory.java b/sdk/android/api/org/webrtc/PeerConnectionFactory.java
+--- a/sdk/android/api/org/webrtc/PeerConnectionFactory.java
++++ b/sdk/android/api/org/webrtc/PeerConnectionFactory.java
+@@ -573,9 +573,19 @@
+ 
+   /** PCM16LE / mono / 24kHz shared render source. No microphone/peer required. */
+   public long startPcmPlayout() { checkPeerConnectionFactoryExists(); return nativeStartPcmPlayout(nativeFactory); }
++  public long startPcmPlayoutSource(int rate, int channels, boolean shared) {
++    checkPeerConnectionFactoryExists();
++    return nativeStartPcmPlayoutSource(nativeFactory, rate, channels, shared);
++  }
++  public long[] getPcmPlayoutSourceState(long generation) {
++    checkPeerConnectionFactoryExists();
++    return nativeGetPcmPlayoutSourceState(nativeFactory, generation);
++  }
++  private static native long nativeStartPcmPlayoutSource(long factory, int rate, int channels, boolean shared);
++  private static native long[] nativeGetPcmPlayoutSourceState(long factory, long generation);
+   public int writePcmPlayout(long generation, long epoch, byte[] pcm) {
+     checkPeerConnectionFactoryExists();
+-    if (pcm == null || pcm.length == 0 || pcm.length > 48000 || pcm.length % 2 != 0) return -3;
++    if (pcm == null || pcm.length == 0 || pcm.length > 192000 || pcm.length % 2 != 0) return -3;
+     return nativeWritePcmPlayout(nativeFactory, generation, epoch, pcm);
+   }
+   public int clearPcmPlayout(long generation, long epoch) { checkPeerConnectionFactoryExists(); return nativeClearPcmPlayout(nativeFactory,generation,epoch); }
+diff --git a/sdk/android/src/jni/pc/peer_connection_factory.cc b/sdk/android/src/jni/pc/peer_connection_factory.cc
+--- a/sdk/android/src/jni/pc/peer_connection_factory.cc
++++ b/sdk/android/src/jni/pc/peer_connection_factory.cc
+@@ -567,11 +567,23 @@
+ static jlong JNI_PeerConnectionFactory_StartPcmPlayout(JNIEnv* env, jlong factory) {
+   return PeerConnectionFactoryFromJava(factory)->StartPcmPlayout();
+ }
++static jlong JNI_PeerConnectionFactory_StartPcmPlayoutSource(JNIEnv* env, jlong factory,
++    jint rate, jint channels, jboolean shared) {
++  return PeerConnectionFactoryFromJava(factory)->StartPcmPlayoutSource(rate, channels, shared);
++}
++static jni_zero::ScopedJavaLocalRef<jlongArray> JNI_PeerConnectionFactory_GetPcmPlayoutSourceState(
++    JNIEnv* env, jlong factory, jlong generation) {
++  const auto values = PeerConnectionFactoryFromJava(factory)->GetPcmPlayoutSourceState(generation);
++  auto result = jni_zero::ScopedJavaLocalRef<jlongArray>::Adopt(env, env->NewLongArray(values.size()));
++  std::vector<jlong> longs(values.begin(), values.end());
++  if (!result.is_null()) env->SetLongArrayRegion(result.obj(), 0, longs.size(), longs.data());
++  return result;
++}
+ static jint JNI_PeerConnectionFactory_WritePcmPlayout(JNIEnv* env, jlong factory, jlong generation, jlong epoch,
+     const jni_zero::JavaRef<jbyteArray>& bytes) {
+   if (bytes.is_null()) return -3;
+   const jsize size = env->GetArrayLength(bytes.obj());
+-  if (size <= 0 || size > 48000 || size % 2) return -3;
++  if (size <= 0 || size > 192000 || size % 2) return -3;
+   std::vector<uint8_t> pcm(size);
+   env->GetByteArrayRegion(bytes.obj(), 0, size, reinterpret_cast<jbyte*>(pcm.data()));
+   if (env->ExceptionCheck()) return -3;
+diff --git a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.h b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.h
+--- a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.h
++++ b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.h
+@@ -15,6 +15,7 @@
+ #import "RTCAudioProcessingState.h"
+ 
+ #define RTC_PCM_PLAYOUT_V1 1
++#define RTC_PCM_PLAYOUT_SHARED 1
+ 
+ NS_ASSUME_NONNULL_BEGIN
+ 
+@@ -81,6 +82,8 @@
+  *  factory-scoped processing state. */
+ @property(nonatomic, readonly) RTC_OBJC_TYPE(RTCAudioProcessingState) *audioProcessingState;
+ - (int64_t)startPcmPlayout;
++- (int64_t)startPcmPlayoutWithSampleRate:(int)rate channels:(int)channels shared:(BOOL)shared;
++- (NSDictionary<NSString *, id> *)pcmPlayoutStateForGeneration:(int64_t)generation;
+ - (int)writePcmPlayout:(NSData *)pcm generation:(int64_t)generation epoch:(int64_t)epoch;
+ - (int)clearPcmPlayout:(int64_t)generation epoch:(int64_t)epoch;
+ - (int)stopPcmPlayout:(int64_t)generation;
+diff --git a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
+--- a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
++++ b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
+@@ -426,8 +426,20 @@
+ }
+ 
+ - (int64_t)startPcmPlayout { return _nativeFactory->StartPcmPlayout(); }
++- (int64_t)startPcmPlayoutWithSampleRate:(int)rate channels:(int)channels shared:(BOOL)shared {
++  return _nativeFactory->StartPcmPlayoutSource(rate, channels, shared);
++}
++- (NSDictionary<NSString *, id> *)pcmPlayoutStateForGeneration:(int64_t)generation {
++  const auto s = _nativeFactory->GetPcmPlayoutSourceState(generation);
++  if (s.size() != 13) return @{};
++  return @{ @"generation": @(s[0]), @"epoch": @(s[1]), @"queuedFrames": @(s[2]),
++    @"acceptedFrames": @(s[3]), @"consumedFrames": @(s[4]), @"discardedFrames": @(s[5]),
++    @"renderCallbacks": @(s[6]), @"underrunCallbacks": @(s[7]), @"playing": @(s[8] != 0),
++    @"delayMs": @(s[9]), @"sampleRate": @(s[10]), @"channels": @(s[11]),
++    @"ownershipMode": s[12] ? @"shared" : @"exclusive" };
++}
+ - (int)writePcmPlayout:(NSData *)pcm generation:(int64_t)generation epoch:(int64_t)epoch {
+-  if (pcm.length == 0 || pcm.length > 48000 || pcm.length % 2) return -3;
++  if (pcm.length == 0 || pcm.length > 192000 || pcm.length % 2) return -3;
+   const uint8_t *bytes = static_cast<const uint8_t *>(pcm.bytes);
+   return _nativeFactory->WritePcmPlayout(generation, epoch, std::vector<uint8_t>(bytes, bytes+pcm.length));
+ }
+diff --git a/sdk/objc/components/audio/RTCAudioSession+Configuration.mm b/sdk/objc/components/audio/RTCAudioSession+Configuration.mm
+--- a/sdk/objc/components/audio/RTCAudioSession+Configuration.mm
++++ b/sdk/objc/components/audio/RTCAudioSession+Configuration.mm
+@@ -158,6 +158,11 @@
+       }
+     }
+     NSInteger outputNumberOfChannels = configuration.outputNumberOfChannels;
++    // Stereo software render remains valid on a mono hardware route. Do not
++    // fail session activation by requesting unavailable Bluetooth channels.
++    if (self.maximumOutputNumberOfChannels > 0) {
++      outputNumberOfChannels = MIN(outputNumberOfChannels, self.maximumOutputNumberOfChannels);
++    }
+     if (self.outputNumberOfChannels != outputNumberOfChannels) {
+       NSError *outputChannelsError = nil;
+       if (![self setPreferredOutputNumberOfChannels:outputNumberOfChannels
+diff --git a/sdk/objc/components/audio/RTCAudioSessionConfiguration.m b/sdk/objc/components/audio/RTCAudioSessionConfiguration.m
+--- a/sdk/objc/components/audio/RTCAudioSessionConfiguration.m
++++ b/sdk/objc/components/audio/RTCAudioSessionConfiguration.m
+@@ -77,12 +77,9 @@
+     _sampleRate = RTC_CONSTANT_TYPE(RTCAudioSessionHighPerformanceSampleRate);
+     _ioBufferDuration = RTC_CONSTANT_TYPE(RTCAudioSessionHighPerformanceIOBufferDuration);
+ 
+-    // We try to use mono in both directions to save resources and format
+-    // conversions in the audio unit. Some devices does only support stereo;
+-    // e.g. wired headset on iPhone 6.
+-    // TODO(henrika): add support for stereo if needed.
++    // Capture remains mono. Prefer stereo output when the route supports it.
+     _inputNumberOfChannels = RTC_CONSTANT_TYPE(RTCAudioSessionPreferredNumberOfChannels);
+-    _outputNumberOfChannels = RTC_CONSTANT_TYPE(RTCAudioSessionPreferredNumberOfChannels);
++    _outputNumberOfChannels = 2;
+   }
+   return self;
+ }
+diff --git a/sdk/objc/native/src/audio/audio_device_ios.mm b/sdk/objc/native/src/audio/audio_device_ios.mm
+--- a/sdk/objc/native/src/audio/audio_device_ios.mm
++++ b/sdk/objc/native/src/audio/audio_device_ios.mm
+@@ -167,7 +167,7 @@
+   // store the parameters now and then verify at a later stage.
+   RTC_OBJC_TYPE(RTCAudioSessionConfiguration)* config =
+       [RTC_OBJC_TYPE(RTCAudioSessionConfiguration) webRTCConfiguration];
+-  playout_parameters_.reset(config.sampleRate, config.outputNumberOfChannels);
++  playout_parameters_.reset(config.sampleRate, 2);
+   record_parameters_.reset(config.sampleRate, config.inputNumberOfChannels);
+   // Ensure that the audio device buffer (ADB) knows about the internal audio
+   // parameters. Note that, even if we are unable to get a mono audio session,
+@@ -485,17 +485,17 @@
+                                           UInt32 num_frames,
+                                           AudioBufferList* io_data) {
+   RTC_DCHECK_RUN_ON(&io_thread_checker_);
+-  // Verify 16-bit, noninterleaved mono PCM signal format.
++  // Verify interleaved PCM16 stereo. Capture remains mono.
+   RTC_DCHECK_EQ(1, io_data->mNumberBuffers);
+   AudioBuffer* audio_buffer = &io_data->mBuffers[0];
+-  RTC_DCHECK_EQ(1, audio_buffer->mNumberChannels);
++  RTC_DCHECK_EQ(2, audio_buffer->mNumberChannels);
+ 
+   // Produce silence and give audio unit a hint about it if playout is not
+   // activated.
+   if (!playing_.load(std::memory_order_acquire)) {
+     const size_t size_in_bytes = audio_buffer->mDataByteSize;
+     RTC_CHECK_EQ(size_in_bytes / VoiceProcessingAudioUnit::kBytesPerSample,
+-                 num_frames);
++                 num_frames * 2);
+     *flags |= kAudioUnitRenderAction_OutputIsSilence;
+     memset(static_cast<int8_t*>(audio_buffer->mData), 0, size_in_bytes);
+     return noErr;
+@@ -554,7 +554,7 @@
+   // `io_data` destination.
+   fine_audio_buffer_->GetPlayoutData(
+       webrtc::ArrayView<int16_t>(static_cast<int16_t*>(audio_buffer->mData),
+-                                 num_frames),
++                                 num_frames * 2),
+       playout_delay_ms);
+ 
+   last_hw_output_latency_update_sample_count_ += num_frames;
+@@ -807,7 +807,7 @@
+   RTC_DCHECK(audio_device_buffer_) << "AttachAudioBuffer must be called first";
+   RTC_DCHECK_GT(playout_parameters_.sample_rate(), 0);
+   RTC_DCHECK_GT(record_parameters_.sample_rate(), 0);
+-  RTC_DCHECK_EQ(playout_parameters_.channels(), 1);
++  RTC_DCHECK_EQ(playout_parameters_.channels(), 2);
+   RTC_DCHECK_EQ(record_parameters_.channels(), 1);
+   // Inform the audio device buffer (ADB) about the new audio format.
+   audio_device_buffer_->SetPlayoutSampleRate(playout_parameters_.sample_rate());
+@@ -863,8 +863,8 @@
+                    << playout_parameters_.frames_per_buffer();
+   RTC_LOG(LS_INFO) << " bytes per I/O buffer: "
+                    << playout_parameters_.GetBytesPerBuffer();
+-  RTC_DCHECK_EQ(playout_parameters_.GetBytesPerBuffer(),
+-                record_parameters_.GetBytesPerBuffer());
++  RTC_DCHECK_EQ(playout_parameters_.frames_per_buffer(),
++                record_parameters_.frames_per_buffer());
+ 
+   // Update the ADB parameters since the sample rate might have changed.
+   UpdateAudioDeviceBuffer();
+@@ -1250,17 +1250,16 @@
+ }
+ 
+ int32_t AudioDeviceIOS::StereoPlayoutIsAvailable(bool& available) {
+-  available = false;
++  available = true;
+   return 0;
+ }
+ 
+ int32_t AudioDeviceIOS::SetStereoPlayout(bool enable) {
+-  RTC_LOG_F(LS_WARNING) << "Not implemented";
+-  return -1;
++  return enable ? 0 : -1;
+ }
+ 
+ int32_t AudioDeviceIOS::StereoPlayout(bool& enabled) const {
+-  enabled = false;
++  enabled = true;
+   return 0;
+ }
+ 
+diff --git a/sdk/objc/native/src/audio/voice_processing_audio_unit.mm b/sdk/objc/native/src/audio/voice_processing_audio_unit.mm
+--- a/sdk/objc/native/src/audio/voice_processing_audio_unit.mm
++++ b/sdk/objc/native/src/audio/voice_processing_audio_unit.mm
+@@ -251,6 +251,10 @@
+   }
+ 
+   // Set the format on the input scope of the output element/bus.
++  // Keep the capture bus mono. The render bus accepts stereo and CoreAudio
++  // converts to the active route when that route supports only mono.
++  format.mChannelsPerFrame = 2;
++  format.mBytesPerFrame = format.mBytesPerPacket = 2 * kBytesPerSample;
+   result = AudioUnitSetProperty(vpio_unit_,
+                                 kAudioUnitProperty_StreamFormat,
+                                 kAudioUnitScope_Input,

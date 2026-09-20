@@ -103,6 +103,7 @@ call git apply "libwebrtc\patches\custom_audio_source_m144.patch" -v --ignore-sp
 call git apply "libwebrtc\patches\external_recording_demand.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn || exit /b 1
 call git apply "libwebrtc\patches\external_pcm_playout.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn || exit /b 1
 call git apply "libwebrtc\patches\pcm_playout_sdk.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn || exit /b 1
+call git apply "libwebrtc\patches\concurrent_pcm_playout.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn || exit /b 1
 call git apply "libwebrtc\patches\add_libwebrtc_build_target.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn || exit /b 1
 cd ..
 

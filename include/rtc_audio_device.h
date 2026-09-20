@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #define LIBWEBRTC_PCM_PLAYOUT_V1 1
+#define LIBWEBRTC_PCM_PLAYOUT_SHARED 1
 
 namespace libwebrtc {
 
@@ -35,6 +36,9 @@ class RTCAudioDevice : public RefCountInterface {
     int64_t underrun_callbacks = 0;
     bool playing = false;
     int delay_ms = -1; // ADM estimate, NOT hardware-played acknowledgement.
+    int sample_rate = 24000;
+    int channels = 1;
+    bool shared = false;
   };
   // V1: PCM16 little-endian, mono 24000 Hz, max 1s/write, max 5s backlog.
   // One owner per factory. Positive Start result is its generation.
@@ -43,6 +47,9 @@ class RTCAudioDevice : public RefCountInterface {
   virtual int ClearPcmPlayout(int64_t generation, int64_t epoch) = 0;
   virtual int StopPcmPlayout(int64_t generation) = 0;
   virtual PcmPlayoutState GetPcmPlayoutState() = 0;
+  // Opt-in shared sources: PCM16LE 24k mono or 48k stereo. Max two owners.
+  virtual int64_t StartPcmPlayoutSource(int rate, int channels, bool shared) = 0;
+  virtual PcmPlayoutState GetPcmPlayoutSourceState(int64_t generation) = 0;
 
   static const int kAdmMaxDeviceNameSize = 128;
   static const int kAdmMaxFileNameSize = 512;

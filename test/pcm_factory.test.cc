@@ -56,6 +56,22 @@ TEST(PcmFactory, OwnsMediaEngineWithoutPeerAndDispatchesAllPcmWorkToWorker) {
   EXPECT_EQ(factory->GetPcmPlayoutState()[0], 0);
   auto next = factory->StartPcmPlayout();
   EXPECT_GT(next, gen);
+  ASSERT_EQ(factory->StopPcmPlayout(next), 0);
+  const auto speech = factory->StartPcmPlayoutSource(24000, 1, true);
+  const auto music = factory->StartPcmPlayoutSource(48000, 2, true);
+  ASSERT_GT(speech, next); ASSERT_GT(music, speech);
+  EXPECT_EQ(factory->StartPcmPlayoutSource(24000, 1, true), -4);
+  EXPECT_EQ(factory->StartPcmPlayout(), -5);
+  EXPECT_EQ(factory->GetPcmPlayoutState()[0], 0);  // Legacy cannot target shared.
+  EXPECT_EQ(factory->WritePcmPlayout(music, 0, std::vector<uint8_t>(1920)), 0);
+  EXPECT_EQ(factory->GetPcmPlayoutSourceState(music)[2], 480);
+  EXPECT_EQ(factory->GetPcmPlayoutSourceState(music)[10], 48000);
+  EXPECT_EQ(factory->ClearPcmPlayout(speech, 1), 0);
+  EXPECT_EQ(factory->GetPcmPlayoutSourceState(music)[1], 0);
+  EXPECT_EQ(factory->StopPcmPlayout(speech), 0);
+  EXPECT_TRUE(playing);
+  EXPECT_EQ(factory->WritePcmPlayout(speech, 1, std::vector<uint8_t>(480)), -2);
+  EXPECT_EQ(factory->GetPcmPlayoutSourceState(music)[0], music);
   // Destruction must quiesce/detach even if the device cannot acknowledge stop.
   fail_stop = true;
   factory = nullptr;

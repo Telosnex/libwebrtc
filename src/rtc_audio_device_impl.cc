@@ -21,13 +21,16 @@ AudioDeviceImpl::~AudioDeviceImpl() {
 }
 
 int64_t AudioDeviceImpl::StartPcmPlayout() {
+  return StartPcmPlayoutSource(24000, 1, false);
+}
+int64_t AudioDeviceImpl::StartPcmPlayoutSource(int rate, int channels, bool shared) {
   return worker_thread_->BlockingCall([&]() -> int64_t {
     if (!transport_ || !transport_->audio_state()) return -1;
-    auto& source = transport_->pcm_source();
-    const int64_t generation = source.Start();
+    auto& sources = transport_->pcm_sources();
+    const int64_t generation = sources.Acquire(rate, channels, shared);
     if (generation <= 0) return generation;
-    if (transport_->audio_state()->AddExternalPlayoutSource(&source) != 0) {
-      source.Stop();
+    if (transport_->audio_state()->AddExternalPlayoutSource(sources.Find(generation)) != 0) {
+      sources.Release(generation);
       return -1;
     }
     return generation;
@@ -35,29 +38,37 @@ int64_t AudioDeviceImpl::StartPcmPlayout() {
 }
 int AudioDeviceImpl::WritePcmPlayout(int64_t generation, int64_t epoch, const uint8_t* bytes, size_t size) {
   return worker_thread_->BlockingCall([&] {
-    return transport_->pcm_source().Write(generation, epoch, bytes, size);
+    auto* source = transport_->pcm_sources().Find(generation);
+    return source ? source->Write(generation, epoch, bytes, size) : -2;
   });
 }
 int AudioDeviceImpl::ClearPcmPlayout(int64_t generation, int64_t epoch) {
   return worker_thread_->BlockingCall([&] {
-    return transport_->pcm_source().Clear(generation, epoch);
+    auto* source = transport_->pcm_sources().Find(generation);
+    return source ? source->Clear(generation, epoch) : -2;
   });
 }
 int AudioDeviceImpl::StopPcmPlayout(int64_t generation) {
   return worker_thread_->BlockingCall([&] {
-    auto& source = transport_->pcm_source();
-    const auto state = source.State();
-    if (generation <= 0 || state.generation != generation) return -2;
+    auto& sources = transport_->pcm_sources();
+    auto* source = sources.Find(generation);
+    if (!source) return -2;
     // Silence immediately, but retain owner on ADM stop failure for retry.
-    if (source.Quiesce(generation) != 0) return -2;
-    if (!transport_->audio_state() || transport_->audio_state()->RemoveExternalPlayoutSource(&source) != 0) return -1;
-    source.Stop();
+    if (source->Quiesce(generation) != 0) return -2;
+    if (!transport_->audio_state() || transport_->audio_state()->RemoveExternalPlayoutSource(source) != 0) return -1;
+    sources.Release(generation);
     return 0;
   });
 }
 RTCAudioDevice::PcmPlayoutState AudioDeviceImpl::GetPcmPlayoutState() {
   return worker_thread_->BlockingCall([&] {
-    auto state = transport_->pcm_source().State();
+    return GetPcmPlayoutSourceState(transport_->pcm_sources().ExclusiveGeneration());
+  });
+}
+RTCAudioDevice::PcmPlayoutState AudioDeviceImpl::GetPcmPlayoutSourceState(int64_t generation) {
+  return worker_thread_->BlockingCall([&] {
+    auto* source = transport_->pcm_sources().Find(generation);
+    auto state = source ? source->State() : PcmPlayoutState{};
     state.playing = audio_device_module_->Playing();
     uint16_t delay = 0;
     if (audio_device_module_->PlayoutDelay(&delay) == 0) state.delay_ms = delay;

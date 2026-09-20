@@ -120,6 +120,7 @@ run_gclient_sync
     --verbose --ignore-space-change --ignore-whitespace --whitespace=nowarn
   git apply "$SCRIPT_DIR/../patches/external_pcm_playout.patch" --ignore-space-change --ignore-whitespace --whitespace=nowarn
   git apply "$SCRIPT_DIR/../patches/pcm_playout_sdk.patch" --ignore-space-change --ignore-whitespace --whitespace=nowarn
+  git apply "$SCRIPT_DIR/../patches/concurrent_pcm_playout.patch" --ignore-space-change --ignore-whitespace --whitespace=nowarn
 )
 
 # Run the real Objective-C bridge against a mock ADM before the long slice

@@ -27,6 +27,8 @@ class AudioDeviceImpl : public RTCAudioDevice,
   int ClearPcmPlayout(int64_t generation, int64_t epoch) override;
   int StopPcmPlayout(int64_t generation) override;
   PcmPlayoutState GetPcmPlayoutState() override;
+  int64_t StartPcmPlayoutSource(int rate, int channels, bool shared) override;
+  PcmPlayoutState GetPcmPlayoutSourceState(int64_t generation) override;
   int16_t PlayoutDevices() override;
 
   int16_t RecordingDevices() override;
