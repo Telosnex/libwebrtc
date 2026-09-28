@@ -107,6 +107,7 @@ jobs:
         with:
           name: libwebrtc-linux-${{ matrix.arch }}-${{ matrix.profile }}
           path: libwebrtc-linux-${{ matrix.arch }}-${{ matrix.profile }}.zip*
+          retention-days: 3
 
   build-win:
     if: github.event_name != 'workflow_dispatch' || github.event.inputs.build_windows == 'true'
@@ -157,6 +158,7 @@ jobs:
         with:
           name: libwebrtc-win-${{ matrix.arch }}-${{ matrix.profile }}
           path: build\libwebrtc-win-${{ matrix.arch }}-${{ matrix.profile }}.zip*
+          retention-days: 3
 
   build-apple:
     if: github.event_name != 'workflow_dispatch' || github.event.inputs.build_apple == 'true'
@@ -193,6 +195,7 @@ jobs:
         with:
           name: webrtc-xcframework-${{ github.event.inputs.configuration || 'release' }}
           path: build/out-${{ github.event.inputs.configuration || 'release' }}/WebRTC.xcframework.zip*
+          retention-days: 3
 
   build-android:
     if: github.event_name != 'workflow_dispatch' || github.event.inputs.build_android == 'true'
@@ -252,6 +255,7 @@ jobs:
         with:
           name: libwebrtc-android-${{ matrix.profile }}
           path: build/android-${{ matrix.profile }}/libwebrtc-android-${{ matrix.profile }}.aar*
+          retention-days: 3
 
   create-release:
     name: Release to GH (Draft)
